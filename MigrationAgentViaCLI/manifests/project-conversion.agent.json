@@ -1,0 +1,13 @@
+{
+  "agentId": "project-conversion",
+  "title": "Project Conversion Agent",
+  "description": "Plans and applies .NET project file conversion toward SDK-style target framework projects.",
+  "icon": "project-conversion.svg",
+  "capabilities": ["Project conversion", "Target framework update", "Conversion diff"],
+  "techstack": ["Python", ".NET CLI", "MSBuild"],
+  "uiSpec": { "input": [{ "name": "sourcePath", "type": "folder", "required": true }, { "name": "dryRun", "type": "toggle" }], "logs": { "stream": true }, "output": ["convertedProjects", "changedFiles", "warnings", "diffPath"] },
+  "apiSpec": { "method": "POST", "endpoint": "/agents/project-conversion/run" },
+  "category": "Migration",
+  "subCategory": ".NET Migration"
+}
+

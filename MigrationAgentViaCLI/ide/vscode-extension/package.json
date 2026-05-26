@@ -1,0 +1,51 @@
+{
+  "name": "migration-agent-vscode",
+  "displayName": ".NET Migration Agent",
+  "description": "Runs MigrationAgentViaCLI agents from VS Code.",
+  "version": "0.1.0",
+  "publisher": "value-momentum",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onCommand:migrationAgent.listAgents",
+    "onCommand:migrationAgent.runRepositoryAnalysis",
+    "onCommand:migrationAgent.runWorkflow",
+    "onCommand:migrationAgent.openArtifacts"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "migrationAgent.listAgents", "title": "Migration Agent: List Agents" },
+      { "command": "migrationAgent.runRepositoryAnalysis", "title": "Migration Agent: Run Repository Analysis" },
+      { "command": "migrationAgent.runWorkflow", "title": "Migration Agent: Run Full Workflow" },
+      { "command": "migrationAgent.openArtifacts", "title": "Migration Agent: Open Artifacts Folder" }
+    ],
+    "configuration": {
+      "title": ".NET Migration Agent",
+      "properties": {
+        "migrationAgent.cliPath": {
+          "type": "string",
+          "default": "migration-agent",
+          "description": "Path to the migration-agent CLI executable."
+        },
+        "migrationAgent.targetFramework": {
+          "type": "string",
+          "default": "net8.0",
+          "description": "Default target framework."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.4.0"
+  }
+}
+

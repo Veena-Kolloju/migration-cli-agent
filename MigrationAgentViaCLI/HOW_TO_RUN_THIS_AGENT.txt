@@ -1,0 +1,166 @@
+HOW TO RUN THIS AGENT
+=====================
+
+Project folder:
+C:\ankita\projects\GenAI Initiative\Agent Development\MigrationAgentViaCLI
+
+
+1. Open Command Prompt
+----------------------
+
+Press Windows + R, type cmd, and press Enter.
+
+Then go to the agent folder:
+
+cd "C:\ankita\projects\GenAI Initiative\Agent Development\MigrationAgentViaCLI"
+
+
+2. Install the agent on a machine
+---------------------------------
+
+Run this once from the project folder:
+
+python -m pip install -e .[dev]
+
+If the short command migration-agent is not available, use:
+
+python -m migration_agent_cli.cli
+
+
+3. Check available agents
+-------------------------
+
+python -m migration_agent_cli.cli list agents
+
+
+4. Configure mandatory Microsoft Agent Framework LLM runtime
+------------------------------------------------------------
+
+This is an agentic solution. Agent execution requires Microsoft Agent Framework
+and an LLM provider. The default provider is Groq through the framework's
+OpenAI-compatible chat client.
+
+Set these in Command Prompt before running any agent:
+
+set GROQ_API_KEY=your-groq-api-key
+set GROQ_MODEL=llama-3.3-70b-versatile
+
+Optional OpenAI configuration:
+
+set MIGRATION_AGENT_LLM_PROVIDER=openai
+set OPENAI_API_KEY=your-openai-api-key
+set OPENAI_MODEL=gpt-4.1-mini
+
+If the LLM key is missing or the framework call fails, the agent run fails.
+
+
+5. Run only the assessment agent
+--------------------------------
+
+Replace the sourcePath value with the legacy application path on your machine:
+
+python -m migration_agent_cli.cli run agent assessment --input-json "{\"sourcePath\":\"C:\\path\\to\\legacy-app\",\"targetFramework\":\"net8.0\"}" --output-dir artifacts --format json
+
+Example for SampleApp1:
+
+python -m migration_agent_cli.cli run agent assessment --input-json "{\"sourcePath\":\"C:\\ankita\\projects\\GenAI Initiative\\Agent Development\\MigrationAgentViaCLI\\samples\\SampleApp1\",\"targetFramework\":\"net8.0\"}" --output-dir artifacts --format json
+
+Output folder:
+artifacts\<run-id>\assessment
+
+Note:
+Assessment gives better project count results when it runs after repository-analysis in a workflow.
+
+
+6. Create a full workflow input file
+------------------------------------
+
+From the project folder, run:
+
+notepad sampleapp1-workflow-input.json
+
+Paste this JSON and update sourcePath if needed:
+
+{
+  "workflowId": "dotnet-migration",
+  "sourcePath": "C:\\ankita\\projects\\GenAI Initiative\\Agent Development\\MigrationAgentViaCLI\\samples\\SampleApp1",
+  "targetFramework": "net8.0",
+  "agents": [
+    "repository-analysis",
+    "assessment",
+    "dependency-analysis",
+    "code-analysis",
+    "project-conversion",
+    "code-transformation",
+    "configuration-migration",
+    "build-validation",
+    "build-fix",
+    "test-validation",
+    "report-generation"
+  ],
+  "outputDir": "artifacts",
+  "dryRun": false,
+  "continueOnError": true
+}
+
+Important:
+"dryRun": true means analysis only. It will not create a migrated app.
+"dryRun": false creates a migrated copy under artifacts\<run-id>\migrated-source.
+
+
+7. Run all agents sequentially
+------------------------------
+
+python -m migration_agent_cli.cli run workflow --input sampleapp1-workflow-input.json --output-dir artifacts --format json
+
+
+8. Find the migrated application
+--------------------------------
+
+After a successful workflow run with "dryRun": false, open:
+
+C:\ankita\projects\GenAI Initiative\Agent Development\MigrationAgentViaCLI\artifacts\<run-id>\migrated-source
+
+Example:
+
+C:\ankita\projects\GenAI Initiative\Agent Development\MigrationAgentViaCLI\artifacts\run-xxxxxxxxxxxx\migrated-source
+
+The original source application is not overwritten.
+
+
+9. Find the migration report
+----------------------------
+
+The report is created here:
+
+artifacts\<run-id>\migration-report.md
+
+
+10. Validate an agent manifest
+-----------------------------
+
+python -m migration_agent_cli.cli validate manifest --file manifests\repository-analysis.agent.json
+
+
+11. Run the included sample legacy app workflow
+----------------------------------------------
+
+python -m migration_agent_cli.cli run workflow --input samples\input\legacy-migration-input.json --output-dir artifacts --format json
+
+
+12. Optional short command
+--------------------------
+
+If this folder is on PATH:
+
+C:\Users\AnkitaSingh\AppData\Roaming\Python\Python314\Scripts
+
+Then you can use:
+
+migration-agent list agents
+
+migration-agent run workflow --input sampleapp1-workflow-input.json --output-dir artifacts --format json
+
+Otherwise, continue using:
+
+python -m migration_agent_cli.cli

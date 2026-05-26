@@ -1,0 +1,22 @@
+{
+  "workflowId": "dotnet-migration",
+  "sourcePath": ".",
+  "targetFramework": "net8.0",
+  "agents": [
+    "repository-analysis",
+    "assessment",
+    "dependency-analysis",
+    "code-analysis",
+    "project-conversion",
+    "code-transformation",
+    "configuration-migration",
+    "build-validation",
+    "build-fix",
+    "test-validation",
+    "report-generation"
+  ],
+  "outputDir": "artifacts",
+  "dryRun": true,
+  "continueOnError": true
+}
+

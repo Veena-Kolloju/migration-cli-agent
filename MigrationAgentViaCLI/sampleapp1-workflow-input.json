@@ -1,0 +1,21 @@
+{
+  "workflowId": "dotnet-migration",
+  "sourcePath": "C:\\ankita\\projects\\GenAI Initiative\\Agent Development\\MigrationAgentViaCLI\\samples\\SampleApp1",
+  "targetFramework": "net8.0",
+  "agents": [
+    "repository-analysis",
+    "assessment",
+    "dependency-analysis",
+    "code-analysis",
+    "project-conversion",
+    "code-transformation",
+    "configuration-migration",
+    "build-validation",
+    "build-fix",
+    "test-validation",
+    "report-generation"
+  ],
+  "outputDir": "artifacts",
+  "dryRun": false,
+  "continueOnError": true
+}

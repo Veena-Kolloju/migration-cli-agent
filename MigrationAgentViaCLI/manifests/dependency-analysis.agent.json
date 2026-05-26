@@ -1,0 +1,20 @@
+{
+  "agentId": "dependency-analysis",
+  "title": "Dependency Analysis Agent",
+  "description": "Analyzes NuGet package references and prepares compatibility and upgrade recommendations.",
+  "icon": "dependency-analysis.svg",
+  "capabilities": ["NuGet scanning", "Compatibility checks", "Upgrade recommendations"],
+  "techstack": ["Python", "FastAPI", "NuGet", ".NET CLI"],
+  "uiSpec": {
+    "input": [
+      { "name": "sourcePath", "type": "folder", "required": true },
+      { "name": "targetFramework", "type": "select", "options": ["net6.0", "net8.0", "net10.0"] }
+    ],
+    "logs": { "stream": true },
+    "output": ["dependencies", "incompatiblePackages", "summary"]
+  },
+  "apiSpec": { "method": "POST", "endpoint": "/agents/dependency-analysis/run" },
+  "category": "Migration",
+  "subCategory": ".NET Migration"
+}
+

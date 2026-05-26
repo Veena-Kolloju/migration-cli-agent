@@ -1,0 +1,20 @@
+{
+  "agentId": "code-analysis",
+  "title": "Code Analysis Agent",
+  "description": "Scans C# source code for framework-specific APIs, deprecated usage, and modernization opportunities.",
+  "icon": "code-analysis.svg",
+  "capabilities": ["C# scanning", "API compatibility findings", "Modernization opportunities"],
+  "techstack": ["Python", "FastAPI", "Groq", "Microsoft Agent Framework"],
+  "uiSpec": {
+    "input": [
+      { "name": "sourcePath", "type": "folder", "required": true },
+      { "name": "targetFramework", "type": "select", "options": ["net6.0", "net8.0", "net10.0"] }
+    ],
+    "logs": { "stream": true },
+    "output": ["findings", "summary"]
+  },
+  "apiSpec": { "method": "POST", "endpoint": "/agents/code-analysis/run" },
+  "category": "Migration",
+  "subCategory": ".NET Migration"
+}
+

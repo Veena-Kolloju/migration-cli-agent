@@ -1,0 +1,13 @@
+{
+  "agentId": "code-transformation",
+  "title": "Code Transformation Agent",
+  "description": "Plans and applies source transformations based on migration analysis findings.",
+  "icon": "code-transformation.svg",
+  "capabilities": ["API replacement", "Namespace updates", "Transformation diff"],
+  "techstack": ["Python", "Groq", "Microsoft Agent Framework"],
+  "uiSpec": { "input": [{ "name": "sourcePath", "type": "folder", "required": true }, { "name": "dryRun", "type": "toggle" }], "logs": { "stream": true }, "output": ["appliedFixes", "changedFiles", "skippedFixes", "diffPath"] },
+  "apiSpec": { "method": "POST", "endpoint": "/agents/code-transformation/run" },
+  "category": "Migration",
+  "subCategory": ".NET Migration"
+}
+

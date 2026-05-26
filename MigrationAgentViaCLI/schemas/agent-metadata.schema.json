@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Agent Metadata",
+  "type": "object",
+  "required": ["agentId", "title", "description", "icon", "capabilities", "techstack", "uiSpec", "apiSpec", "category", "subCategory"],
+  "properties": {
+    "agentId": { "type": "string" },
+    "title": { "type": "string" },
+    "description": { "type": "string" },
+    "icon": { "type": "string" },
+    "capabilities": { "type": "array", "items": { "type": "string" } },
+    "techstack": { "type": "array", "items": { "type": "string" } },
+    "uiSpec": { "type": "object" },
+    "apiSpec": { "type": "object" },
+    "category": { "type": "string" },
+    "subCategory": { "type": "string" }
+  }
+}
+

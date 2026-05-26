@@ -1,0 +1,20 @@
+{
+  "agentId": "repository-analysis",
+  "title": "Repository Analysis Agent",
+  "description": "Discovers .NET solutions, project files, target frameworks, package files, configuration files, and repository structure.",
+  "icon": "repository-analysis.svg",
+  "capabilities": ["Repository scanning", "Project discovery", "Framework detection"],
+  "techstack": ["Python", "FastAPI", "Typer", ".NET CLI"],
+  "uiSpec": {
+    "input": [
+      { "name": "sourcePath", "type": "folder", "required": true },
+      { "name": "targetFramework", "type": "select", "options": ["net6.0", "net8.0", "net10.0"] }
+    ],
+    "logs": { "stream": true },
+    "output": ["solutions", "projects", "configFiles", "packageFiles", "repoSummary"]
+  },
+  "apiSpec": { "method": "POST", "endpoint": "/agents/repository-analysis/run" },
+  "category": "Migration",
+  "subCategory": ".NET Migration"
+}
+

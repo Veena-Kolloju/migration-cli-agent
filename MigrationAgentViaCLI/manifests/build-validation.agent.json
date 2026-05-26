@@ -1,0 +1,13 @@
+{
+  "agentId": "build-validation",
+  "title": "Build Validation Agent",
+  "description": "Captures restore and build execution details and structures compiler warnings and errors.",
+  "icon": "build-validation.svg",
+  "capabilities": ["Restore", "Build execution", "Compiler error parsing"],
+  "techstack": ["Python", ".NET CLI", "MSBuild"],
+  "uiSpec": { "input": [{ "name": "sourcePath", "type": "folder", "required": true }, { "name": "buildCommand", "type": "text", "defaultValue": "dotnet build" }], "logs": { "stream": true }, "output": ["buildStatus", "errors", "warnings", "summary"] },
+  "apiSpec": { "method": "POST", "endpoint": "/agents/build-validation/run" },
+  "category": "Migration",
+  "subCategory": ".NET Migration"
+}
+

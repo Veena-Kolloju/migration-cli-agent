@@ -1,0 +1,17 @@
+{
+  "workflowId": "dotnet-migration",
+  "sourcePath": "../legacy-dotnet-app",
+  "targetFramework": "net8.0",
+  "agents": [
+    "repository-analysis",
+    "assessment",
+    "dependency-analysis",
+    "code-analysis",
+    "project-conversion",
+    "configuration-migration",
+    "report-generation"
+  ],
+  "outputDir": "artifacts",
+  "dryRun": false,
+  "continueOnError": true
+}

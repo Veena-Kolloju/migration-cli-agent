@@ -1,0 +1,21 @@
+{
+  "agentId": "orchestrator",
+  "title": "Orchestrator Agent",
+  "description": "Coordinates selected .NET migration agents in workflow order and consolidates their outputs.",
+  "icon": "orchestrator.svg",
+  "capabilities": ["Workflow execution", "Agent coordination", "Consolidated reporting"],
+  "techstack": ["Python", "FastAPI", "Typer", "Microsoft Agent Framework"],
+  "uiSpec": {
+    "input": [
+      { "name": "sourcePath", "type": "folder", "required": true },
+      { "name": "targetFramework", "type": "select", "options": ["net6.0", "net8.0", "net10.0"] },
+      { "name": "agents", "type": "multiselect" }
+    ],
+    "logs": { "stream": true },
+    "output": ["workflowStatus", "agentResults", "summary"]
+  },
+  "apiSpec": { "method": "POST", "endpoint": "/workflow/run" },
+  "category": "Migration",
+  "subCategory": ".NET Migration"
+}
+

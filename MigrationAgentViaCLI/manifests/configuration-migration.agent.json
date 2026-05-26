@@ -1,0 +1,13 @@
+{
+  "agentId": "configuration-migration",
+  "title": "Configuration Migration Agent",
+  "description": "Migrates legacy app.config and web.config settings into modern configuration artifacts.",
+  "icon": "configuration-migration.svg",
+  "capabilities": ["Config migration", "appsettings generation", "Secret reference detection"],
+  "techstack": ["Python", "FastAPI", ".NET"],
+  "uiSpec": { "input": [{ "name": "sourcePath", "type": "folder", "required": true }, { "name": "secretsHandling", "type": "select", "options": ["mark-as-secret-reference", "copy-values", "skip"] }], "logs": { "stream": true }, "output": ["generatedFiles", "migratedSettings", "unmigratedSettings", "warnings"] },
+  "apiSpec": { "method": "POST", "endpoint": "/agents/configuration-migration/run" },
+  "category": "Migration",
+  "subCategory": ".NET Migration"
+}
+

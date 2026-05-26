@@ -1,0 +1,20 @@
+{
+  "agentId": "assessment",
+  "title": "Assessment Agent",
+  "description": "Scores migration readiness and identifies blockers, risks, estimated effort, and recommended migration path.",
+  "icon": "assessment.svg",
+  "capabilities": ["Readiness scoring", "Risk identification", "Migration planning"],
+  "techstack": ["Python", "FastAPI", "Groq", "Microsoft Agent Framework"],
+  "uiSpec": {
+    "input": [
+      { "name": "sourcePath", "type": "folder", "required": false },
+      { "name": "targetFramework", "type": "select", "options": ["net6.0", "net8.0", "net10.0"] }
+    ],
+    "logs": { "stream": true },
+    "output": ["readinessScore", "complexity", "blockers", "risks", "estimatedEffort"]
+  },
+  "apiSpec": { "method": "POST", "endpoint": "/agents/assessment/run" },
+  "category": "Migration",
+  "subCategory": ".NET Migration"
+}
+

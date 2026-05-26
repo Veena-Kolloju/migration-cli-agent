@@ -1,0 +1,8 @@
+{
+  "sourcePath": ".",
+  "targetFramework": "net8.0",
+  "includePaths": [],
+  "excludePaths": ["bin", "obj", ".git"],
+  "outputDir": "artifacts"
+}
+

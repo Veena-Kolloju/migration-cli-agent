@@ -1,0 +1,22 @@
+{
+  "workflowId": "dotnet-migration",
+  "sourcePath": "C:\\VS Code\\Ankita\\Migration_Agent_test_projects\\eShopOnWeb",
+  "targetFramework": "net8.0",
+  "agents": [
+    "repository-analysis",
+    "assessment",
+    "dependency-analysis",
+    "code-analysis",
+    "project-conversion",
+    "code-transformation",
+    "configuration-migration",
+    "frontend-migration",
+    "build-validation",
+    "build-fix",
+    "test-validation",
+    "report-generation"
+  ],
+  "outputDir": "artifacts",
+  "dryRun": false,
+  "continueOnError": true
+}

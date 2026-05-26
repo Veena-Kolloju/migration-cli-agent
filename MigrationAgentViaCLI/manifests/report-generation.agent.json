@@ -1,0 +1,13 @@
+{
+  "agentId": "report-generation",
+  "title": "Report Generation Agent",
+  "description": "Generates reports from standalone or orchestrated agent outputs.",
+  "icon": "report-generation.svg",
+  "capabilities": ["HTML report", "JSON summary", "Executive summary"],
+  "techstack": ["Python", "FastAPI", "Groq"],
+  "uiSpec": { "input": [{ "name": "inputArtifactsPath", "type": "folder", "required": false }, { "name": "reportFormat", "type": "multiselect", "options": ["html", "json", "markdown"] }], "logs": { "stream": true }, "output": ["reports", "summary"] },
+  "apiSpec": { "method": "POST", "endpoint": "/agents/report-generation/run" },
+  "category": "Migration",
+  "subCategory": ".NET Migration"
+}
+

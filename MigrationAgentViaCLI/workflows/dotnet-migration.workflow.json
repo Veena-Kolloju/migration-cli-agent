@@ -1,0 +1,43 @@
+{
+  "workflowId": "dotnet-migration",
+  "title": ".NET Migration Workflow",
+  "description": "Runs independent .NET migration agents in a coordinated workflow.",
+  "capabilities": [
+    "Repository analysis",
+    "Assessment",
+    "Dependency analysis",
+    "Code analysis",
+    "Project conversion",
+    "Code transformation",
+    "Configuration migration",
+    "Build validation",
+    "Build fix",
+    "Test validation",
+    "Report generation"
+  ],
+  "agents": [
+    "repository-analysis",
+    "assessment",
+    "dependency-analysis",
+    "code-analysis",
+    "project-conversion",
+    "code-transformation",
+    "configuration-migration",
+    "frontend-migration",
+    "build-validation",
+    "build-fix",
+    "test-validation",
+    "report-generation"
+  ],
+  "devops": {
+    "tool": "Azure DevOps",
+    "repoUrl": "",
+    "branch": "main",
+    "patTokenRef": "AZURE_DEVOPS_PAT"
+  },
+  "auth": {
+    "type": "secret-reference",
+    "required": false
+  }
+}
+

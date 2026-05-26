@@ -1,0 +1,13 @@
+{
+  "agentId": "test-validation",
+  "title": "Test Validation Agent",
+  "description": "Captures test execution status and categorizes migration-related failures.",
+  "icon": "test-validation.svg",
+  "capabilities": ["Test execution", "Failure categorization", "Regression summary"],
+  "techstack": ["Python", ".NET CLI", "pytest-style reporting"],
+  "uiSpec": { "input": [{ "name": "sourcePath", "type": "folder", "required": true }, { "name": "testCommand", "type": "text", "defaultValue": "dotnet test" }], "logs": { "stream": true }, "output": ["testStatus", "passed", "failed", "failedTests", "summary"] },
+  "apiSpec": { "method": "POST", "endpoint": "/agents/test-validation/run" },
+  "category": "Migration",
+  "subCategory": ".NET Migration"
+}
+

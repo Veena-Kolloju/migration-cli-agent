@@ -1,0 +1,13 @@
+{
+  "agentId": "build-fix",
+  "title": "Build Fix Agent",
+  "description": "Plans automated fixes for common build failures after project conversion and code transformation.",
+  "icon": "build-fix.svg",
+  "capabilities": ["Build error fixes", "Package fixes", "Namespace fixes"],
+  "techstack": ["Python", "Groq", ".NET CLI", "Microsoft Agent Framework"],
+  "uiSpec": { "input": [{ "name": "sourcePath", "type": "folder", "required": true }, { "name": "maxIterations", "type": "number", "defaultValue": 3 }], "logs": { "stream": true }, "output": ["fixStatus", "appliedFixes", "unresolvedErrors", "diffPath"] },
+  "apiSpec": { "method": "POST", "endpoint": "/agents/build-fix/run" },
+  "category": "Migration",
+  "subCategory": ".NET Migration"
+}
+
