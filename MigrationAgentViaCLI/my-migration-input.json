@@ -1,6 +1,6 @@
 {
   "workflowId": "dotnet-migration",
-  "sourcePath": "C:\\VS Code\\Ankita\\Migration_Agent_test_projects\\eShopOnWeb",
+  "sourcePath": "C:\\VS Code\\Ankita\\Migration_Agent_test_project4\\mvc5-crud-on-single-page-with-razor-mvvm",
   "targetFramework": "net8.0",
   "agents": [
     "repository-analysis",

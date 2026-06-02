@@ -31,7 +31,7 @@ class StructuredMigrationAgent(MigrationAgent):
         try:
             output = self.analyze(context, logs)
             logs.append("Running mandatory Microsoft Agent Framework LLM review.")
-            output["agenticReview"] = run_agentic_review(self.title, self.description, output)
+            output["agenticReview"] = run_agentic_review(self.title, self.description, output, context.input_data.get("targetFramework", ""))
             logs.append(f"Completed {self.title}.")
             return AgentExecutionResult.completed(context, started, logs, output)
         except Exception as exc:

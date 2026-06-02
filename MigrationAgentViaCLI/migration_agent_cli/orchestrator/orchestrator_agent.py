@@ -54,7 +54,21 @@ class OrchestratorAgent(MigrationAgent):
         if not failed_count:
             logs.append("Running mandatory Microsoft Agent Framework LLM workflow review.")
             try:
-                output["agenticReview"] = run_agentic_review(self.title, self.description, output)
+                source_framework = next(
+                    (p.get("targetFramework") for r in agent_results if r.get("agent_id") == "repository-analysis"
+                     for p in r.get("output", {}).get("projects", [])), "unknown"
+                )
+                target_framework = context.input_data.get("targetFramework", "")
+                review_output = {
+                    **output,
+                    "migrationContext": {
+                        "sourceFramework": source_framework,
+                        "targetFramework": target_framework,
+                        "migrationStatus": "completed",
+                        "note": f"Migration from {source_framework} to {target_framework} has already been completed.",
+                    },
+                }
+                output["agenticReview"] = run_agentic_review(self.title, self.description, review_output, target_framework)
             except Exception as exc:
                 logs.append(f"Failed {self.title}: {exc}")
                 return AgentExecutionResult(

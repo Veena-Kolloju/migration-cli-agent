@@ -55,7 +55,7 @@ class FrontendMigrationAgent(StructuredMigrationAgent):
             if result:
                 generated.append(result["file"])
                 if result.get("route"):
-                    routes.append({"path": result["route"], "component": result["component"]})
+                    routes.append({"path": result["route"], "component": result["component"], "importPath": result.get("importPath", "")})
 
         # Convert Blazor components → React components
         for blazor_file in blazor_components:
@@ -134,13 +134,26 @@ def _convert_razor_to_react(
     # Build imports
     imports = ["import React, { useState, useEffect } from 'react';"]
     if inject_lines or model_type:
-        imports.append("import api from '../services/api';")
+        # Calculate relative path to services based on component depth
+        depth = len(out_dir.relative_to(src_dir).parts)
+        services_path = "../" * depth + "services/api"
+        imports.append(f"import api from '{services_path}';")
 
     react_component = _build_react_component(component_name, imports, jsx_body, model_type)
     out_file.write_text(react_component, encoding="utf-8")
 
+    # Build relative import path from src/ to the generated file
+    try:
+        import_path = "./" + out_file.relative_to(src_dir).as_posix().replace(".jsx", "")
+    except ValueError:
+        import_path = f"./pages/{component_name}"
+
+    # Clean Razor route patterns → valid React Router path
+    clean_route = re.sub(r'\{[^}]*\}', ':param', route).rstrip('/') or '/'
+    clean_route = re.sub(r':param$', '', clean_route).rstrip('/') or '/'
+
     logs.append(f"Converted Razor page {razor_file.name} → {out_file.name}")
-    return {"file": str(out_file), "route": route, "component": component_name}
+    return {"file": str(out_file), "route": clean_route, "component": component_name, "importPath": import_path}
 
 
 # ---------------------------------------------------------------------------
@@ -419,13 +432,24 @@ def _generate_scaffold(
     generated.append(str(main_file))
 
     # src/App.jsx with React Router routes
+    # Deduplicate imports by component name to avoid "already declared" errors
+    seen_components: dict[str, dict[str, str]] = {}
+    dedup_routes = []
+    for r in routes:
+        if not r.get("component") or not r.get("path"):
+            continue
+        comp_name = r['component']
+        if comp_name not in seen_components:
+            seen_components[comp_name] = r
+            dedup_routes.append(r)
+    
     route_imports = "\n".join(
-        f"import {r['component']} from './pages/{r['component']}';"
-        for r in routes if r.get("component") and r.get("path")
+        f"import {r['component']} from '{r.get('importPath', './pages/' + r['component'])}';"
+        for r in dedup_routes
     )
     route_elements = "\n".join(
         f"        <Route path=\"{r['path']}\" element={{<{r['component']} />}} />"
-        for r in routes if r.get("component") and r.get("path")
+        for r in dedup_routes
     )
     app_jsx = (
         "import React from 'react';\n"
@@ -468,6 +492,11 @@ def _extract_html_body(content: str) -> str:
     content = re.sub(r'@(model|page|inject|using|addTagHelper|namespace)[^\n]*\n', '', content)
     # Remove @section blocks
     content = re.sub(r'@section\s+\w+\s*\{[^}]*\}', '', content, flags=re.DOTALL)
+    # Remove inline @if/@for/@foreach/@while/@switch/@using blocks with nested braces
+    content = re.sub(r'@(if|for|foreach|while|switch|using)\s*\([^)]*\)\s*\{[^}]*\}', '', content, flags=re.DOTALL)
+    # Remove standalone {if}, {for}, {foreach}, {while} etc (already converted but incomplete)
+    content = re.sub(r'\{(if|for|foreach|while|switch)\}[^}]*\{', '', content, flags=re.DOTALL)
+    content = re.sub(r'\{(if|for|foreach|while)\}.*?\}\s*\{', '<!-- TODO: conditional/loop -->', content, flags=re.DOTALL)
     return content.strip()
 
 
@@ -475,6 +504,15 @@ def _html_to_jsx(html: str) -> str:
     """Convert HTML string to basic JSX."""
     if not html.strip():
         return "<div>{/* TODO: add content */}</div>"
+    
+    # Decode HTML entities before processing
+    html = html.replace('&gt;', '>')
+    html = html.replace('&lt;', '<')
+    html = html.replace('&amp;', '&')
+    html = html.replace('&quot;', '"')
+    html = html.replace('&#39;', "'")
+    html = html.replace('&nbsp;', ' ')
+    
     try:
         soup = BeautifulSoup(html, "lxml")
         body = soup.find("body")
@@ -489,8 +527,8 @@ def _html_to_jsx(html: str) -> str:
     # JSX attribute conversions
     inner = inner.replace(' class=', ' className=')
     inner = inner.replace(' for=', ' htmlFor=')
-    inner = re.sub(r'<!--', '{/*', inner)
-    inner = re.sub(r'-->', '*/}', inner)
+    inner = inner.replace('<!--', '{/*')
+    inner = inner.replace('-->', '*/}')
 
     # Convert Razor expressions @Variable → {variable}
     inner = re.sub(r'@([A-Z][A-Za-z0-9.]+)', r'{\1}', inner)

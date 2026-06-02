@@ -39,6 +39,11 @@ class ProjectConversionAgent(StructuredMigrationAgent):
         ignore = shutil.ignore_patterns("bin", "obj", ".git", ".vs", "artifacts")
         shutil.copytree(source, migrated_root, ignore=ignore)
 
+        global_json = migrated_root / "global.json"
+        if global_json.exists():
+            global_json.unlink()
+            logs.append("Removed global.json from migrated-source to avoid SDK version pinning.")
+
         changed_files: list[str] = []
         converted_projects: list[dict[str, str]] = []
         upgrade_assistant_available = _check_upgrade_assistant(logs)
@@ -159,11 +164,16 @@ class BuildValidationAgent(StructuredMigrationAgent):
             return {"buildStatus": "skipped", "exitCode": None, "errors": [], "warnings": [], "summary": {"errorCount": 0, "warningCount": 0, "failedProjects": 0}}
 
         build_path = Path(migrated_root)
-        logs.append(f"Running dotnet restore on {build_path.name}.")
-        restore_result = _run_dotnet("dotnet restore", build_path, logs)
+
+        # Find the primary solution file to avoid ambiguity
+        sln_files = list(build_path.glob("*.sln"))
+        sln_arg = str(sln_files[0].name) if len(sln_files) == 1 else "eShopOnWeb.sln" if (build_path / "eShopOnWeb.sln").exists() else (sln_files[0].name if sln_files else "")
+
+        logs.append(f"Running dotnet restore on {build_path.name} using {sln_arg}.")
+        restore_result = _run_dotnet(f"dotnet restore {sln_arg}".strip(), build_path, logs)
 
         logs.append(f"Running dotnet build on {build_path.name}.")
-        build_result = _run_dotnet("dotnet build --no-restore", build_path, logs)
+        build_result = _run_dotnet(f"dotnet build {sln_arg} --no-restore".strip(), build_path, logs)
 
         errors = _parse_build_output(build_result["output"])
         warnings = _parse_build_output(build_result["output"], severity="warning")
@@ -235,8 +245,10 @@ class TestValidationAgent(StructuredMigrationAgent):
             return {"testStatus": "skipped", "passed": 0, "failed": 0, "skipped": 0, "failedTests": [], "summary": "No migrated source available."}
 
         test_path = Path(migrated_root)
-        logs.append(f"Running dotnet test on {test_path.name}.")
-        result = _run_dotnet("dotnet test --no-build --logger trx", test_path, logs)
+        sln_files = list(test_path.glob("*.sln"))
+        sln_arg = str(sln_files[0].name) if len(sln_files) == 1 else "eShopOnWeb.sln" if (test_path / "eShopOnWeb.sln").exists() else (sln_files[0].name if sln_files else "")
+        logs.append(f"Running dotnet test on {test_path.name} using {sln_arg}.")
+        result = _run_dotnet(f"dotnet test {sln_arg} --no-build --logger trx".strip(), test_path, logs)
 
         passed, failed, skipped_count, failed_tests = _parse_test_output(result["output"], logs)
         test_status = "passed" if result["exitCode"] == 0 else "failed"

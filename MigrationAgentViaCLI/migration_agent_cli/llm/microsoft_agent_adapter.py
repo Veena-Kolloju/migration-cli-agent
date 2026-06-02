@@ -74,7 +74,7 @@ def _get_event_loop() -> asyncio.AbstractEventLoop:
     return _event_loop
 
 
-def run_agentic_review(agent_title: str, agent_description: str, output: dict[str, Any]) -> dict[str, Any]:
+def run_agentic_review(agent_title: str, agent_description: str, output: dict[str, Any], target_framework: str = "") -> dict[str, Any]:
     config = load_agentic_runtime_config()
     try:
         from agent_framework import Agent
@@ -98,9 +98,11 @@ def run_agentic_review(agent_title: str, agent_description: str, output: dict[st
             "summary, recommendations, risks, manualActions."
         ),
     )
+    framework_line = f"Migration target framework: {target_framework}\n" if target_framework else ""
     prompt = (
         f"Agent: {agent_title}\n"
         f"Description: {agent_description}\n"
+        f"{framework_line}"
         "Scanner output JSON:\n"
         f"{json.dumps(output, default=str)[:12000]}\n\n"
         "Return only valid JSON."
