@@ -59,9 +59,70 @@ CS_TRANSFORMATION_RULES: list[tuple[str, str, str]] = [
         "System.Web using removed",
     ),
     (
+        r'using System\.Web\.Security;',
+        r'// using System.Web.Security; // Removed: replaced by ASP.NET Core Identity',
+        "System.Web.Security using removed",
+    ),
+    (
+        r'using System\.Web\.Optimization;',
+        r'// using System.Web.Optimization; // Removed: replaced by Vite/Webpack bundling',
+        "System.Web.Optimization using removed",
+    ),
+    (
+        r'using System\.Web\.([A-Za-z.]+);',
+        r'// using System.Web.\1; // Removed: not available in .NET Core',
+        "System.Web.* using removed",
+    ),
+    (
         r'using System\.Web\.Routing;',
         r'using Microsoft.AspNetCore.Routing;',
         "System.Web.Routing → Microsoft.AspNetCore.Routing",
+    ),
+    (
+        r'\bDbModelBuilder\b',
+        r'ModelBuilder',
+        "DbModelBuilder → ModelBuilder (EF Core)",
+    ),
+    (
+        r'using System\.Data\.Entity;',
+        r'using Microsoft.EntityFrameworkCore;',
+        "System.Data.Entity → Microsoft.EntityFrameworkCore",
+    ),
+    # EF6-only DbContext constructor taking connection string name → parameterless + OnConfiguring
+    (
+        r'(public\s+\w+\(\)[\r\n\s]*:[\r\n\s]*base\()"[^"]+"(\))',
+        r'\1\2',
+        "EF6 base(connectionString) constructor → parameterless EF Core constructor",
+    ),
+    # UnintentionalCodeFirstException → remove the throw entirely
+    (
+        r'\s*throw new UnintentionalCodeFirstException\(\);',
+        r'',
+        "UnintentionalCodeFirstException removed — EF6-only",
+    ),
+    # System.Data.EntityState → Microsoft.EntityFrameworkCore.EntityState
+    (
+        r'System\.Data\.EntityState',
+        r'Microsoft.EntityFrameworkCore.EntityState',
+        "System.Data.EntityState → Microsoft.EntityFrameworkCore.EntityState",
+    ),
+    # JsonRequestBehavior.AllowGet — not needed in ASP.NET Core
+    (
+        r',\s*JsonRequestBehavior\.AllowGet',
+        r'',
+        "JsonRequestBehavior.AllowGet removed — not needed in ASP.NET Core",
+    ),
+    # Session["key"] → HttpContext.Session.GetString("key")
+    (
+        r'Session\[([^\]]+)\]',
+        r'HttpContext.Session.GetString(\1)',
+        "Session[] → HttpContext.Session.GetString()",
+    ),
+    # AuthConfig.RegisterAuth() — deleted file, comment it out
+    (
+        r'AuthConfig\.RegisterAuth\(\);',
+        r'// AuthConfig.RegisterAuth(); // Removed: replaced by ASP.NET Core Identity + JWT',
+        "AuthConfig.RegisterAuth removed — replaced by Identity",
     ),
     # WebForms / MVC base classes
     (
@@ -169,6 +230,8 @@ STARTUP_PATTERN = re.compile(
 
 def transform_cs_file(source: str, file_path: Path, logs: list[str]) -> tuple[str, list[dict[str, Any]]]:
     """Apply all transformation rules to a single C# file. Returns (transformed_source, applied_fixes)."""
+    from migration_agent_cli.core.guardrails import check_cs_file
+
     result = source
     applied: list[dict[str, Any]] = []
 
@@ -182,7 +245,24 @@ def transform_cs_file(source: str, file_path: Path, logs: list[str]) -> tuple[st
             })
             result = new_result
 
+    result = _deduplicate_usings(result)
+    result = check_cs_file(source, result, file_path.name, logs)
     return result, applied
+
+
+def _deduplicate_usings(source: str) -> str:
+    """Remove duplicate using directives, keeping the first occurrence."""
+    lines = source.splitlines(keepends=True)
+    seen: set[str] = set()
+    output: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('using ') and stripped.endswith(';') and '//' not in stripped:
+            if stripped in seen:
+                continue
+            seen.add(stripped)
+        output.append(line)
+    return ''.join(output)
 
 
 def generate_program_cs(startup_path: Path, logs: list[str]) -> str | None:

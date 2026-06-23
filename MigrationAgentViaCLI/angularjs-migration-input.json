@@ -1,0 +1,25 @@
+{
+  "workflowId": "dotnet-migration",
+  "sourcePath": "C:\\VS Code\\Ankita\\Migration_Agent_test_project7\\AngularJs-with-asp.net-Mvc\\AngularJs-with-asp.net-Mvc",
+  "targetFramework": "net8.0",
+  "agents": [
+    "repository-analysis",
+    "assessment",
+    "dependency-analysis",
+    "code-analysis",
+    "project-conversion",
+    "ef-migration",
+    "api-transformation",
+    "auth-transformation",
+    "code-transformation",
+    "configuration-migration",
+    "frontend-migration",
+    "build-validation",
+    "build-fix",
+    "test-validation",
+    "report-generation"
+  ],
+  "outputDir": "artifacts",
+  "dryRun": false,
+  "continueOnError": true
+}

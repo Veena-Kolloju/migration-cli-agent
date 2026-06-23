@@ -5,6 +5,9 @@ from migration_agent_cli.agents.code_analysis import CodeAnalysisAgent
 from migration_agent_cli.agents.dependency_analysis import DependencyAnalysisAgent
 from migration_agent_cli.agents.repository_analysis import RepositoryAnalysisAgent
 from migration_agent_cli.agents.frontend_migration import FrontendMigrationAgent
+from migration_agent_cli.agents.api_transformation import ApiTransformationAgent
+from migration_agent_cli.agents.ef_migration import EfMigrationAgent
+from migration_agent_cli.agents.auth_transformation import AuthTransformationAgent
 from migration_agent_cli.agents.simple_agents import (
     BuildFixAgent,
     BuildValidationAgent,
@@ -24,6 +27,9 @@ def all_agents() -> dict[str, MigrationAgent]:
         DependencyAnalysisAgent(),
         CodeAnalysisAgent(),
         ProjectConversionAgent(),
+        EfMigrationAgent(),
+        ApiTransformationAgent(),
+        AuthTransformationAgent(),
         CodeTransformationAgent(),
         ConfigurationMigrationAgent(),
         FrontendMigrationAgent(),

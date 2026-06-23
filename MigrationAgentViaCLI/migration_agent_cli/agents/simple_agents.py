@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -51,6 +52,7 @@ class ProjectConversionAgent(StructuredMigrationAgent):
         for relative_project in projects:
             project_path = migrated_root / relative_project
             original = project_path.read_text(encoding="utf-8", errors="ignore")
+            has_assembly_info = any(project_path.parent.rglob("AssemblyInfo.cs"))
 
             # Try upgrade-assistant first
             if upgrade_assistant_available:
@@ -61,13 +63,25 @@ class ProjectConversionAgent(StructuredMigrationAgent):
                     continue
 
             # Fallback: manual conversion preserving all PackageReferences
-            converted = _convert_csproj_to_sdk_style(original, target_framework)
+            converted = _convert_csproj_to_sdk_style(original, target_framework, has_assembly_info, project_path)
             if converted != original:
-                project_path.write_text(converted, encoding="utf-8")
-                changed_files.append(str(project_path))
-                converted_projects.append({"path": relative_project, "status": "converted"})
+                from migration_agent_cli.core.guardrails import check_xml
+                if check_xml(converted, project_path.name, logs):
+                    project_path.write_text(converted, encoding="utf-8")
+                    changed_files.append(str(project_path))
+                    if has_assembly_info:
+                        logs.append(f"Added GenerateAssemblyInfo=false for {relative_project} to avoid CS0579 duplicate attribute errors.")
+                    converted_projects.append({"path": relative_project, "status": "converted"})
+                else:
+                    converted_projects.append({"path": relative_project, "status": "guardrailFailed"})
             else:
                 converted_projects.append({"path": relative_project, "status": "reviewRequired"})
+
+        # Regenerate .sln file to avoid old-format restore failures
+        _regenerate_sln(migrated_root, projects, logs)
+
+        # Copy static files to wwwroot for each web project
+        _setup_wwwroot(migrated_root, logs)
 
         return {
             "convertedProjects": converted_projects,
@@ -96,6 +110,7 @@ class CodeTransformationAgent(StructuredMigrationAgent):
         all_fixes: list[dict[str, Any]] = []
         changed_files: list[str] = []
         startup_migrated: list[str] = []
+        has_startup = any(root.rglob("Startup.cs"))
 
         for cs_file in root.rglob("*.cs"):
             if any(part in {"bin", "obj"} for part in cs_file.parts):
@@ -112,13 +127,60 @@ class CodeTransformationAgent(StructuredMigrationAgent):
                 program_cs = generate_program_cs(cs_file, logs)
                 if program_cs:
                     program_path = cs_file.parent / "Program.cs"
-                    # Only write if Program.cs doesn't already exist or is the old WebHost style
                     existing = program_path.read_text(encoding="utf-8", errors="ignore") if program_path.exists() else ""
                     if "CreateHostBuilder" in existing or "CreateWebHostBuilder" in existing or not program_path.exists():
                         program_path.write_text(program_cs, encoding="utf-8")
                         startup_migrated.append(str(program_path))
                         logs.append(f"Generated modern Program.cs at {program_path.name}.")
 
+        # Handle Global.asax — generate Program.cs if no Startup.cs exists
+        for global_asax in root.rglob("Global.asax.cs"):
+            if any(part in {"bin", "obj"} for part in global_asax.parts):
+                continue
+            program_path = global_asax.parent / "Program.cs"
+            if not program_path.exists() and not has_startup:
+                program_cs = _generate_program_cs_from_global_asax(global_asax, logs)
+                program_path.write_text(program_cs, encoding="utf-8")
+                startup_migrated.append(str(program_path))
+                logs.append(f"Generated Program.cs from Global.asax.cs at {global_asax.parent.name}.")
+            # Neutralize Global.asax.cs — comment out System.Web references
+            original = global_asax.read_text(encoding="utf-8", errors="ignore")
+            neutralized = re.sub(r'^(using System\.Web[^;]*;)', r'// \1  // Removed: not available in .NET Core', original, flags=re.MULTILINE)
+            # Remove base class entirely — HttpApplication doesn't exist in .NET Core
+            neutralized = re.sub(r'\s*:\s*System\.Web\.HttpApplication', '', neutralized)
+            neutralized = re.sub(r'\s*:\s*HttpApplication', '', neutralized)
+            # Comment out AreaRegistration — not available in .NET Core
+            neutralized = re.sub(
+                r'(AreaRegistration\.RegisterAllAreas\(\);)',
+                r'// \1  // Removed: AreaRegistration not available in .NET Core',
+                neutralized
+            )
+            if neutralized != original:
+                global_asax.write_text(neutralized, encoding="utf-8")
+                changed_files.append(str(global_asax))
+                logs.append(f"Neutralized System.Web references in {global_asax.name}.")
+
+        # Disable dead App_Start files
+        _disable_dead_app_start_files(root, changed_files, logs)
+
+        # Clean up legacy files replaced by modern equivalents
+        _cleanup_legacy_files(root, logs)
+
+        # Delete Views/Web.config — MVC5-specific, not needed in .NET 8
+        for views_webconfig in root.rglob("Web.config"):
+            if "Views" in views_webconfig.parts and views_webconfig.exists():
+                views_webconfig.unlink()
+                logs.append(f"Deleted MVC5-specific Views/Web.config.")
+
+        # Transform Razor views
+        for cshtml_file in root.rglob("*.cshtml"):
+            if any(part in {"bin", "obj"} for part in cshtml_file.parts):
+                continue
+            _transform_razor_view(cshtml_file, changed_files, logs)
+
+        from migration_agent_cli.core.guardrails import check_program_cs_exists, check_target_framework
+        check_program_cs_exists(migrated_root, logs)
+        check_target_framework(migrated_root, context.input_data.get("targetFramework", "net8.0"), logs)
         logs.append(f"Transformed {len(changed_files)} files with {len(all_fixes)} fixes. Startup migrations: {len(startup_migrated)}.")
         return {
             "appliedFixes": all_fixes,
@@ -172,8 +234,16 @@ class BuildValidationAgent(StructuredMigrationAgent):
         logs.append(f"Running dotnet restore on {build_path.name} using {sln_arg}.")
         restore_result = _run_dotnet(f"dotnet restore {sln_arg}".strip(), build_path, logs)
 
+        # If solution-level restore failed, try restoring each project individually
+        if restore_result["exitCode"] != 0:
+            logs.append("Solution restore failed — attempting per-project restore.")
+            for csproj in build_path.rglob("*.csproj"):
+                _run_dotnet(f"dotnet restore {csproj.name}", csproj.parent, logs)
+            restore_result = _run_dotnet(f"dotnet restore {sln_arg}".strip(), build_path, logs)
+
         logs.append(f"Running dotnet build on {build_path.name}.")
-        build_result = _run_dotnet(f"dotnet build {sln_arg} --no-restore".strip(), build_path, logs)
+        build_cmd = f"dotnet build {sln_arg}".strip() if restore_result["exitCode"] == 0 else f"dotnet build {sln_arg} --no-restore".strip()
+        build_result = _run_dotnet(build_cmd, build_path, logs)
 
         errors = _parse_build_output(build_result["output"])
         warnings = _parse_build_output(build_result["output"], severity="warning")
@@ -213,7 +283,16 @@ class BuildFixAgent(StructuredMigrationAgent):
         changed_files: list[str] = []
         unresolved: list[dict[str, Any]] = []
 
+        # Deduplicate errors by (file, code) before processing
+        seen_errors: set[tuple[str, str]] = set()
+        unique_errors: list[dict[str, Any]] = []
         for error in errors:
+            key = (_extract_cs_path(error.get("file", "")), error.get("code", ""))
+            if key not in seen_errors:
+                seen_errors.add(key)
+                unique_errors.append(error)
+
+        for error in unique_errors:
             fix = _attempt_build_fix(error, Path(migrated_root), logs)
             if fix:
                 applied_fixes.append(fix)
@@ -223,11 +302,27 @@ class BuildFixAgent(StructuredMigrationAgent):
                 unresolved.append(error)
 
         logs.append(f"Applied {len(applied_fixes)} fixes. Unresolved: {len(unresolved)}.")
+
+        # Re-run build after fixes to confirm they worked
+        rebuild_status = "notRun"
+        rebuild_errors: list[dict[str, Any]] = []
+        if applied_fixes:
+            logs.append("Re-running dotnet build after fixes to verify.")
+            build_path = Path(migrated_root)
+            sln_files = list(build_path.glob("*.sln"))
+            sln_arg = sln_files[0].name if sln_files else ""
+            rebuild_result = _run_dotnet(f"dotnet build {sln_arg}".strip(), build_path, logs)
+            rebuild_errors = _parse_build_output(rebuild_result["output"])
+            rebuild_status = "succeeded" if rebuild_result["exitCode"] == 0 else "failed"
+            logs.append(f"Post-fix build {rebuild_status}. Remaining errors: {len(rebuild_errors)}.")
+
         return {
             "fixStatus": "completed" if not unresolved else "partial",
             "appliedFixes": applied_fixes,
             "changedFiles": changed_files,
             "unresolvedErrors": unresolved,
+            "rebuildStatus": rebuild_status,
+            "rebuildErrors": rebuild_errors,
             "diffPath": None,
         }
 
@@ -292,6 +387,16 @@ class ReportGenerationAgent(StructuredMigrationAgent):
         build_errors = context.shared_state.get("build-validation", {}).get("errors", [])
         build_warnings = context.shared_state.get("build-validation", {}).get("warnings", [])
         build_fixes = context.shared_state.get("build-fix", {}).get("appliedFixes", [])
+        rebuild_status = context.shared_state.get("build-fix", {}).get("rebuildStatus", "notRun")
+        rebuild_errors = context.shared_state.get("build-fix", {}).get("rebuildErrors", [])
+
+        # True overall status: prefer post-fix rebuild result if available
+        if rebuild_status == "succeeded":
+            overall_status = "succeeded"
+        elif rebuild_status == "failed":
+            overall_status = "failed"
+        else:
+            overall_status = build_status
         test_status = context.shared_state.get("test-validation", {}).get("testStatus", "notRun")
         test_passed = context.shared_state.get("test-validation", {}).get("passed", 0)
         test_failed = context.shared_state.get("test-validation", {}).get("failed", 0)
@@ -349,8 +454,10 @@ class ReportGenerationAgent(StructuredMigrationAgent):
             f"- Errors: {len(build_errors)}",
             f"- Warnings: {len(build_warnings)}",
             f"- Auto-fixes applied: {len(build_fixes)}",
+            f"- Post-fix build status: {rebuild_status}",
+            f"- Post-fix remaining errors: {len(rebuild_errors)}",
         ]
-        for err in build_errors[:10]:
+        for err in rebuild_errors[:10] or build_errors[:10]:
             lines.append(f"  - [{err.get('code')}] {err.get('file')}:{err.get('line')} — {err.get('message')}")
 
         lines += [
@@ -375,19 +482,336 @@ class ReportGenerationAgent(StructuredMigrationAgent):
             "6. Run full test suite and fix migration-related failures.",
         ]
 
+        # Scan TODO comments from migrated source
+        todo_items = _scan_todo_comments(migrated_source, logs) if migrated_source else []
+        if todo_items:
+            lines += ["", "## TODO Items — Manual Review Required", ""]
+            current_file = None
+            for item in todo_items:
+                if item["file"] != current_file:
+                    current_file = item["file"]
+                    # Show relative path
+                    rel = current_file.replace(str(migrated_source), "").lstrip("\\/")
+                    lines.append(f"### {rel}")
+                lines.append(f"- Line {item['line']}: {item['message']}")
+
+        from migration_agent_cli.core.guardrails import check_report_status_accuracy
+        check_report_status_accuracy(overall_status, len(build_errors), logs)
         report_path.write_text("\n".join(lines), encoding="utf-8")
         return {
             "reports": [str(report_path)],
             "summary": {
-                "overallStatus": build_status,
+                "overallStatus": overall_status,
                 "agentOutputs": statuses,
                 "buildErrors": len(build_errors),
                 "testsPassed": test_passed,
                 "testsFailed": test_failed,
                 "frontendGenerated": bool(frontend_root),
+                "todoItemsFound": len(todo_items),
                 "manualActionsRequired": len(code_findings) + len(incompatible) + len(build_errors),
             },
         }
+
+
+def _scan_todo_comments(migrated_source: str, logs: list[str]) -> list[dict[str, Any]]:
+    """Scan all .cs and .jsx/.js files for TODO comments and return structured list."""
+    todo_items: list[dict[str, Any]] = []
+    root = Path(migrated_source)
+    extensions = {'.cs', '.jsx', '.js', '.ts', '.tsx'}
+    todo_pattern = re.compile(r'//\s*TODO[:\s](.+)', re.IGNORECASE)
+    # Vendor file names and folders to skip
+    vendor_folders = {'ext', 'node_modules', '.git', 'bin', 'obj'}
+    vendor_filenames = {
+        'jquery.js', 'jquery.min.js', 'jquery-1.8.2.js', 'jquery-2.1.1.js',
+        'jquery-ui-1.8.24.js', 'jquery-ui-1.8.24.min.js',
+        'jquery.validate.js', 'jquery.validate-vsdoc.js',
+        'jquery.unobtrusive-ajax.js', 'angular.js', 'angular-scenario.js',
+        'angular-cookies.js', 'modernizr-2.6.2.js', 'knockout-2.2.0.js',
+        'knockout-2.2.0.debug.js', 'bootstrap.js', 'restangular.js',
+    }
+
+    for file in sorted(root.rglob('*')):
+        if file.suffix not in extensions:
+            continue
+        if any(p in vendor_folders for p in file.parts):
+            continue
+        if file.name in vendor_filenames:
+            continue
+        try:
+            for line_num, line in enumerate(file.read_text(encoding='utf-8', errors='ignore').splitlines(), 1):
+                match = todo_pattern.search(line)
+                if match:
+                    todo_items.append({
+                        'file': str(file),
+                        'line': line_num,
+                        'message': match.group(1).strip(),
+                    })
+        except Exception:
+            continue
+
+    logs.append(f"Found {len(todo_items)} TODO items in migrated source.")
+    return todo_items
+
+
+def _setup_wwwroot(migrated_root: Path, logs: list[str]) -> None:
+    """Create wwwroot and copy Content/Scripts/fonts into it for each web project."""
+    static_map = {"Content": "css", "Scripts": "js", "fonts": "fonts"}
+    for csproj in migrated_root.rglob("*.csproj"):
+        csproj_text = csproj.read_text(encoding="utf-8", errors="ignore")
+        if "Microsoft.NET.Sdk.Web" not in csproj_text:
+            continue
+        project_dir = csproj.parent
+        wwwroot = project_dir / "wwwroot"
+        wwwroot.mkdir(exist_ok=True)
+        for src_folder, dest_folder in static_map.items():
+            src = project_dir / src_folder
+            if src.exists():
+                dest = wwwroot / dest_folder
+                if dest.exists():
+                    shutil.rmtree(dest)
+                shutil.copytree(src, dest)
+                logs.append(f"Copied {src_folder} → wwwroot/{dest_folder} in {csproj.parent.name}.")
+
+
+def _regenerate_sln(migrated_root: Path, projects: list[str], logs: list[str]) -> None:
+    """Regenerate .sln file for SDK-style projects to avoid old-format restore failures."""
+    sln_files = list(migrated_root.glob("*.sln"))
+    if not sln_files:
+        return
+    sln_name = sln_files[0].stem
+    sln_files[0].unlink()
+    result = subprocess.run(
+        ["dotnet", "new", "sln", "-n", sln_name],
+        capture_output=True, text=True, cwd=str(migrated_root)
+    )
+    if result.returncode != 0:
+        logs.append(f"Failed to create new sln: {result.stderr[:200]}")
+        return
+    for relative_project in projects:
+        csproj = migrated_root / relative_project
+        if csproj.exists():
+            subprocess.run(
+                ["dotnet", "sln", f"{sln_name}.sln", "add", str(csproj)],
+                capture_output=True, text=True, cwd=str(migrated_root)
+            )
+    logs.append(f"Regenerated {sln_name}.sln with {len(projects)} projects.")
+
+
+def _cleanup_legacy_files(root: Path, logs: list[str]) -> None:
+    """Delete legacy files that are fully replaced by modern equivalents after migration."""
+    # Web.config family — replaced by appsettings.json
+    for f in ["Web.config", "Web.Debug.config", "Web.Release.config"]:
+        for target in root.rglob(f):
+            if any(p in target.parts for p in {"bin", "obj", "Views"}):
+                continue
+            target.unlink()
+            logs.append(f"Deleted legacy config file: {target.name}.")
+
+    # packages.config — replaced by .csproj PackageReferences
+    for target in root.rglob("packages.config"):
+        if any(p in target.parts for p in {"bin", "obj"}):
+            continue
+        target.unlink()
+        logs.append(f"Deleted packages.config — replaced by .csproj PackageReferences.")
+
+    # Global.asax — replaced by Program.cs
+    for target in root.rglob("Global.asax"):
+        if any(p in target.parts for p in {"bin", "obj"}):
+            continue
+        target.unlink()
+        logs.append(f"Deleted Global.asax — replaced by Program.cs.")
+
+
+def _disable_dead_app_start_files(root: Path, changed_files: list[str], logs: list[str]) -> None:
+    """Delete dead App_Start files — always deleted regardless of content since they are never needed in .NET Core."""
+    dead_files = {"BundleConfig.cs", "RouteConfig.cs", "FilterConfig.cs", "WebApiConfig.cs"}
+    for cs_file in root.rglob("*.cs"):
+        if cs_file.name not in dead_files:
+            continue
+        if any(part in {"bin", "obj"} for part in cs_file.parts):
+            continue
+        cs_file.unlink()
+        logs.append(f"Deleted dead App_Start file: {cs_file.name}.")
+
+
+def _transform_razor_view(cshtml_file: Path, changed_files: list[str], logs: list[str]) -> None:
+    """Transform MVC5 Razor syntax to ASP.NET Core compatible syntax."""
+    original = cshtml_file.read_text(encoding="utf-8", errors="ignore")
+    updated = original
+
+    # @Styles.Render → actual <link> tags
+    def replace_styles(match: re.Match) -> str:
+        bundle_path = match.group(0)
+        # Find wwwroot/css files relative to the project
+        wwwroot_css = cshtml_file.parent
+        while wwwroot_css.name not in ("Views", "wwwroot") and wwwroot_css.parent != wwwroot_css:
+            wwwroot_css = wwwroot_css.parent
+        css_dir = wwwroot_css.parent / "wwwroot" / "css" if "Views" in str(wwwroot_css) else wwwroot_css / "css"
+        tags = []
+        if css_dir.exists():
+            for css_file in sorted(css_dir.glob("*.css")):
+                if "min" not in css_file.name or not (css_dir / css_file.name.replace(".min", "")).exists():
+                    tags.append(f'<link href="~/css/{css_file.name}" rel="stylesheet" />')
+        return "\n    ".join(tags) if tags else "<!-- CSS files not found, add manually -->"
+
+    def replace_scripts(match: re.Match) -> str:
+        wwwroot_js = cshtml_file.parent
+        while wwwroot_js.name not in ("Views", "wwwroot") and wwwroot_js.parent != wwwroot_js:
+            wwwroot_js = wwwroot_js.parent
+        js_dir = wwwroot_js.parent / "wwwroot" / "js" if "Views" in str(wwwroot_js) else wwwroot_js / "js"
+        tags = []
+        if js_dir.exists():
+            for js_file in sorted(js_dir.glob("*.js")):
+                if "min" not in js_file.name and "intellisense" not in js_file.name and "vsdoc" not in js_file.name:
+                    tags.append(f'<script src="~/js/{js_file.name}"></script>')
+        return "\n    ".join(tags) if tags else "<!-- JS files not found, add manually -->"
+
+    updated = re.sub(r'@Scripts\.Render\([^)]+\)', replace_scripts, updated)
+    updated = re.sub(r'@Styles\.Render\([^)]+\)', replace_styles, updated)
+
+    # @Html.AntiForgeryToken()
+    updated = re.sub(
+        r'@Html\.AntiForgeryToken\(\)',
+        '@Html.AntiForgeryToken() @* Verify: use [ValidateAntiForgeryToken] on controller *@',
+        updated
+    )
+    updated = re.sub(r'@section\s+scripts\s*\{', '@section Scripts {', updated)
+
+    if updated != original:
+        cshtml_file.write_text(updated, encoding="utf-8")
+        changed_files.append(str(cshtml_file))
+        logs.append(f"Transformed Razor view: {cshtml_file.name}.")
+
+
+def _generate_program_cs_from_global_asax(global_asax: Path, logs: list[str]) -> str:
+    """Generate a minimal Program.cs scaffold from Global.asax.cs for legacy MVC apps."""
+    try:
+        text = global_asax.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        text = ""
+
+    ns_match = re.search(r'namespace\s+([\w.]+)', text)
+    namespace = ns_match.group(1) if ns_match else "MyApp"
+    has_mvc = "RegisterRoutes" in text or "RouteConfig" in text
+    has_bundle = "RegisterBundles" in text or "BundleConfig" in text
+    has_filter = "RegisterGlobalFilters" in text or "FilterConfig" in text
+
+    # Detect actual DbContext class name from migrated source
+    db_context_name = None
+    project_dir = global_asax.parent
+    for cs_file in project_dir.rglob("*.cs"):
+        if any(p in cs_file.parts for p in {"bin", "obj"}):
+            continue
+        try:
+            cs_text = cs_file.read_text(encoding="utf-8", errors="ignore")
+            m = re.search(r'public\s+partial\s+class\s+(\w+)\s*:\s*IdentityDbContext', cs_text)
+            if m:
+                db_context_name = m.group(1)
+                break
+        except Exception:
+            continue
+
+    # If no IdentityDbContext found, generate a separate ApplicationDbContext for Identity
+    if not db_context_name:
+        db_context_name = "ApplicationDbContext"
+        app_db_context_path = project_dir / "Models" / "ApplicationDbContext.cs"
+        app_db_context_path.parent.mkdir(exist_ok=True)
+        app_db_context_path.write_text(
+            "using Microsoft.AspNetCore.Identity.EntityFrameworkCore;\n"
+            "using Microsoft.EntityFrameworkCore;\n\n"
+            "namespace MvcApplication1.Models\n{\n"
+            "    public class ApplicationDbContext : IdentityDbContext<ApplicationUser>\n    {\n"
+            "        public ApplicationDbContext(DbContextOptions<ApplicationDbContext> options)\n"
+            "            : base(options) { }\n"
+            "    }\n}\n",
+            encoding="utf-8",
+        )
+        logs.append("Generated ApplicationDbContext.cs for ASP.NET Core Identity.")
+
+    lines = [
+        "// Auto-generated Program.cs from Global.asax.cs — review before building",
+        "",
+        "using Microsoft.AspNetCore.Authentication.JwtBearer;",
+        "using Microsoft.AspNetCore.Identity;",
+        "using Microsoft.EntityFrameworkCore;",
+        "using Microsoft.IdentityModel.Tokens;",
+        "using System.Text;",
+        "using MvcApplication1.Models;",
+        "",
+        "var builder = WebApplication.CreateBuilder(args);",
+        "",
+        "// --- Services ---",
+        "builder.Services.AddControllers();",
+        "builder.Services.AddEndpointsApiExplorer();",
+        "builder.Services.AddSwaggerGen();",
+        "builder.Services.AddHttpContextAccessor();",
+        "builder.Services.AddMemoryCache();",
+        "builder.Services.AddDistributedMemoryCache();",
+        "builder.Services.AddSession();",
+        "",
+        "// --- CORS ---",
+        "builder.Services.AddCors(options =>",
+        "{",
+        "    options.AddPolicy(\"AllowFrontend\", policy =>",
+        "        policy.WithOrigins(\"http://localhost:5173\")",
+        "              .AllowAnyHeader()",
+        "              .AllowAnyMethod());",
+        "});",
+        "",
+        "// --- Identity ---",
+        f"builder.Services.AddDbContext<{db_context_name}>(options =>",
+        "    options.UseSqlServer(builder.Configuration.GetConnectionString(\"DefaultConnection\")));",
+        f"builder.Services.AddIdentity<ApplicationUser, IdentityRole>()",
+        f"    .AddEntityFrameworkStores<{db_context_name}>()",
+        "    .AddDefaultTokenProviders();",
+        "",
+        "// --- JWT Authentication ---",
+        "builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)",
+        "    .AddJwtBearer(options =>",
+        "    {",
+        "        options.TokenValidationParameters = new TokenValidationParameters",
+        "        {",
+        "            ValidateIssuer = true,",
+        "            ValidateAudience = true,",
+        "            ValidateLifetime = true,",
+        "            ValidateIssuerSigningKey = true,",
+        "            ValidIssuer = builder.Configuration[\"Jwt:Issuer\"],",
+        "            ValidAudience = builder.Configuration[\"Jwt:Audience\"],",
+        "            IssuerSigningKey = new SymmetricSecurityKey(",
+        "                Encoding.UTF8.GetBytes(builder.Configuration[\"Jwt:Key\"]!))",
+        "        };",
+        "    });",
+        "",
+        "var app = builder.Build();",
+        "",
+        "if (app.Environment.IsDevelopment())",
+        "{",
+        "    app.UseSwagger();",
+        "    app.UseSwaggerUI();",
+        "}",
+        "else",
+        "{",
+        "    app.UseExceptionHandler(\"/Home/Error\");",
+        "    app.UseHsts();",
+        "}",
+        "",
+        "app.UseHttpsRedirection();",
+        "app.UseStaticFiles();",
+        "app.UseRouting();",
+        "app.UseCors(\"AllowFrontend\");",
+        "app.UseAuthentication();",
+        "app.UseAuthorization();",
+        "app.UseSession();",
+        "",
+    ]
+    if has_bundle:
+        lines.append("// TODO: BundleConfig.RegisterBundles — replace with Vite or Webpack bundling")
+    if has_filter:
+        lines.append("// TODO: FilterConfig.RegisterGlobalFilters — migrate to ASP.NET Core middleware")
+    lines.append("app.MapControllers();")
+    lines += ["", "app.Run();"]
+    logs.append(f"Scaffolded Program.cs from {global_asax.name} for namespace {namespace}.")
+    return "\n".join(lines)
 
 
 def _attempt_build_fix(error: dict[str, Any], migrated_root: Path, logs: list[str]) -> dict[str, Any] | None:
@@ -396,14 +820,59 @@ def _attempt_build_fix(error: dict[str, Any], migrated_root: Path, logs: list[st
     file_path = error.get("file", "")
     message = error.get("message", "")
 
-    if not file_path:
+    # NU1101: Unable to find package — remove it from the .csproj
+    if code == "NU1101":
+        pkg_match = re.search(r'Unable to find package ([\w.]+)', message)
+        if pkg_match:
+            pkg_name = pkg_match.group(1)
+            for csproj in migrated_root.rglob("*.csproj"):
+                try:
+                    csproj_text = csproj.read_text(encoding="utf-8", errors="ignore")
+                    # Remove PackageReference line for this package
+                    updated = re.sub(
+                        rf'\s*<PackageReference\s+Include="{re.escape(pkg_name)}"[^/]*/?>',
+                        '',
+                        csproj_text,
+                        flags=re.IGNORECASE,
+                    )
+                    if updated != csproj_text:
+                        csproj.write_text(updated, encoding="utf-8")
+                        logs.append(f"Removed unfindable package {pkg_name} from {csproj.name}.")
+                        return {"file": str(csproj), "code": code, "fix": f"Removed package {pkg_name} — not available on nuget.org"}
+                except Exception:
+                    continue
         return None
 
-    target = Path(file_path)
+    # Extract real .cs path — error file field may contain junk text before the path
+    real_path = _extract_cs_path(file_path)
+    if not real_path:
+        return None
+
+    target = Path(real_path)
     if not target.exists():
-        # Try resolving relative to migrated root
-        target = migrated_root / file_path
-    if not target.exists() or target.suffix != ".cs":
+        target = migrated_root / real_path
+    if not target.exists():
+        return None
+
+    # CS0579: duplicate assembly attribute — add GenerateAssemblyInfo=false to csproj
+    if code == "CS0579":
+        csproj_match = re.search(r'\[([^\]]+\.csproj)\]', message)
+        if csproj_match:
+            csproj = Path(csproj_match.group(1))
+            if csproj.exists():
+                csproj_text = csproj.read_text(encoding="utf-8", errors="ignore")
+                if "<GenerateAssemblyInfo>" not in csproj_text:
+                    csproj_text = csproj_text.replace(
+                        "</PropertyGroup>",
+                        "  <GenerateAssemblyInfo>false</GenerateAssemblyInfo>\n  </PropertyGroup>",
+                        1
+                    )
+                    csproj.write_text(csproj_text, encoding="utf-8")
+                    logs.append(f"Added GenerateAssemblyInfo=false to {csproj.name} to fix CS0579.")
+                    return {"file": str(csproj), "code": code, "fix": "Added GenerateAssemblyInfo=false"}
+        return None
+
+    if target.suffix != ".cs":
         return None
 
     try:
@@ -413,22 +882,52 @@ def _attempt_build_fix(error: dict[str, Any], migrated_root: Path, logs: list[st
 
     updated = source
 
-    # CS0234 / CS0246: missing type or namespace — add common using
+    # CS0234 / CS0246: missing type or namespace
     if code in ("CS0234", "CS0246"):
         ns_match = re.search(r"type or namespace name '([\w.]+)'", message)
-        if ns_match:
-            missing = ns_match.group(1)
-            using_map = {
-                "IConfiguration": "using Microsoft.Extensions.Configuration;",
-                "IMemoryCache": "using Microsoft.Extensions.Caching.Memory;",
-                "IHttpContextAccessor": "using Microsoft.AspNetCore.Http;",
-                "JsonSerializer": "using System.Text.Json;",
-                "ILogger": "using Microsoft.Extensions.Logging;",
-            }
-            if missing in using_map and using_map[missing] not in updated:
-                updated = using_map[missing] + "\n" + updated
+        missing = ns_match.group(1) if ns_match else ""
 
-    # CS0103: name does not exist — common _configuration field injection hint
+        using_map = {
+            "IConfiguration": "using Microsoft.Extensions.Configuration;",
+            "IMemoryCache": "using Microsoft.Extensions.Caching.Memory;",
+            "IHttpContextAccessor": "using Microsoft.AspNetCore.Http;",
+            "JsonSerializer": "using System.Text.Json;",
+            "ILogger": "using Microsoft.Extensions.Logging;",
+            "Controller": "using Microsoft.AspNetCore.Mvc;",
+            "ActionResult": "using Microsoft.AspNetCore.Mvc;",
+            "HttpGet": "using Microsoft.AspNetCore.Mvc;",
+            "HttpPost": "using Microsoft.AspNetCore.Mvc;",
+            "Route": "using Microsoft.AspNetCore.Mvc;",
+            "BundleCollection": None,  # remove the file — System.Web.Optimization gone
+            "GlobalFilterCollection": None,  # remove — System.Web.Mvc.Filters gone
+            "Optimization": None,
+            "HttpApplication": None,
+        }
+
+        if missing in using_map:
+            fix_using = using_map[missing]
+            if fix_using is None:
+                # Comment out the entire file — it's a dead legacy helper
+                updated = "// This file references legacy System.Web APIs not available in .NET Core.\n// It has been disabled during migration. Review and rewrite if needed.\n/*\n" + source + "\n*/"
+            elif fix_using not in updated:
+                updated = fix_using + "\n" + updated
+
+        # System.Web namespace references — comment them out
+        updated = re.sub(
+            r'^(using System\.Web(?:\.\w+)*;)',
+            r'// \1  // Removed: System.Web not available in .NET Core',
+            updated, flags=re.MULTILINE
+        )
+
+    # CS0246: HttpConfiguration — delete WebApiConfig.cs entirely
+    if code == "CS0246" and "HttpConfiguration" in message:
+        if target.exists():
+            target.unlink()
+            logs.append(f"Deleted {target.name} — HttpConfiguration not available in .NET Core.")
+            return {"file": str(target), "code": code, "fix": "Deleted file — HttpConfiguration is dead legacy"}
+        return None
+
+    # CS0103: name does not exist
     if code == "CS0103" and "_configuration" in message:
         if "private readonly IConfiguration _configuration;" not in updated:
             updated = re.sub(
@@ -443,6 +942,42 @@ def _attempt_build_fix(error: dict[str, Any], migrated_root: Path, logs: list[st
         return {"file": str(target), "code": code, "fix": f"Applied automated fix for {code}"}
 
     return None
+
+
+def _exclude_file_from_csproj(cs_file: Path, migrated_root: Path, logs: list[str]) -> None:
+    """Add a <Compile Remove="..."> entry to the nearest .csproj so the SDK doesn't compile this file."""
+    for csproj in migrated_root.rglob("*.csproj"):
+        if any(p in csproj.parts for p in {"bin", "obj"}):
+            continue
+        try:
+            relative = cs_file.relative_to(csproj.parent)
+        except ValueError:
+            continue
+        csproj_text = csproj.read_text(encoding="utf-8", errors="ignore")
+        exclude_entry = f'    <Compile Remove="{relative}" />'
+        if exclude_entry in csproj_text:
+            return
+        # Insert before </Project>
+        updated = csproj_text.replace(
+            "</Project>",
+            f"\n  <ItemGroup>\n{exclude_entry}\n  </ItemGroup>\n</Project>"
+        )
+        csproj.write_text(updated, encoding="utf-8")
+        logs.append(f"Excluded {cs_file.name} from {csproj.name} compilation.")
+        return
+
+
+def _extract_cs_path(file_field: str) -> str:
+    """Extract the first valid absolute .cs file path from a potentially malformed error file string."""
+    # Try to find a Windows absolute path ending in .cs
+    match = re.search(r'([A-Za-z]:\\[^\n\r]+\.cs)', file_field)
+    if match:
+        return match.group(1).strip()
+    # Fallback: return as-is if it looks like a plain path
+    stripped = file_field.strip()
+    if stripped.endswith('.cs'):
+        return stripped
+    return ''
 
 
 def _run_dotnet(command: str, cwd: Path, logs: list[str]) -> dict[str, Any]:
@@ -463,7 +998,8 @@ def _run_dotnet(command: str, cwd: Path, logs: list[str]) -> dict[str, Any]:
 
 def _parse_build_output(output: str, severity: str = "error") -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
-    # MSBuild error/warning format: file(line,col): error|warning CODE: message
+
+    # MSBuild compiler format: file(line,col): error|warning CODE: message
     pattern = re.compile(
         rf'([^\(]+)\((\d+),(\d+)\):\s+{severity}\s+(\w+):\s+(.+)',
         re.IGNORECASE,
@@ -477,6 +1013,38 @@ def _parse_build_output(output: str, severity: str = "error") -> list[dict[str, 
             "message": match.group(5).strip(),
             "severity": severity,
         })
+
+    # NuGet restore error format: error NU1234 : message (no file/line)
+    if severity == "error":
+        nu_pattern = re.compile(r'error\s+(NU\d+)\s*:?\s*(.+)', re.IGNORECASE)
+        seen_codes: set[str] = {f["code"] for f in findings}
+        for match in nu_pattern.finditer(output):
+            code = match.group(1).upper()
+            if code not in seen_codes:
+                findings.append({
+                    "file": "",
+                    "line": 0,
+                    "column": 0,
+                    "code": code,
+                    "message": match.group(2).strip(),
+                    "severity": severity,
+                })
+                seen_codes.add(code)
+
+        # Generic "error :" lines without a code (e.g. dotnet restore failures)
+        generic_pattern = re.compile(r'^\s*error\s*:\s*(.+)', re.IGNORECASE | re.MULTILINE)
+        for match in generic_pattern.finditer(output):
+            msg = match.group(1).strip()
+            if msg and not any(f["message"] == msg for f in findings):
+                findings.append({
+                    "file": "",
+                    "line": 0,
+                    "column": 0,
+                    "code": "RESTORE_ERROR",
+                    "message": msg,
+                    "severity": severity,
+                })
+
     return findings
 
 
@@ -545,7 +1113,7 @@ def _detect_sdk(project_xml: str) -> str:
     return "Microsoft.NET.Sdk"
 
 
-def _convert_csproj_to_sdk_style(project_xml: str, target_framework: str) -> str:
+def _convert_csproj_to_sdk_style(project_xml: str, target_framework: str, has_assembly_info: bool = False, project_path: Path | None = None) -> str:
     sdk = _detect_sdk(project_xml)
 
     # Preserve all existing PackageReference entries
@@ -561,10 +1129,94 @@ def _convert_csproj_to_sdk_style(project_xml: str, target_framework: str) -> str
         existing_refs[name] = version
 
     # Also pick up old-style <Reference Include="SomeLib, Version=...">
+    # Skip System.*, Microsoft.*, DotNetOpenAuth.*, WebMatrix.*, WebGrease, Antlr — all dead in .NET Core
+    _dead_reference_prefixes = (
+        "System", "Microsoft", "DotNetOpenAuth", "WebMatrix",
+        "WebGrease", "Antlr", "Modernizr",
+    )
     for match in re.finditer(r'<Reference Include="([^"]+)"', project_xml):
         raw = match.group(1).split(",")[0].strip()
-        if raw and not raw.startswith("System") and not raw.startswith("Microsoft") and raw not in existing_refs:
+        if raw and not any(raw.startswith(p) for p in _dead_reference_prefixes) and raw not in existing_refs:
             existing_refs[raw] = "*"
+
+    # Legacy packages that must be removed — they don't exist in .NET Core
+    dead_packages = {
+        # ASP.NET MVC / WebPages / WebAPI — replaced by ASP.NET Core
+        "Microsoft.AspNet.Mvc", "Microsoft.AspNet.Mvc.FixedDisplayModes",
+        "Microsoft.AspNet.Razor", "Microsoft.AspNet.WebPages",
+        "Microsoft.AspNet.WebPages.Data", "Microsoft.AspNet.WebPages.OAuth",
+        "Microsoft.AspNet.WebPages.WebData",
+        "Microsoft.AspNet.WebApi", "Microsoft.AspNet.WebApi.Client",
+        "Microsoft.AspNet.WebApi.Core", "Microsoft.AspNet.WebApi.OData",
+        "Microsoft.AspNet.WebApi.WebHost",
+        "Microsoft.AspNet.Web.Optimization", "Microsoft.Web.Infrastructure",
+        # OAuth — no .NET 8 equivalent, replaced by ASP.NET Core Identity
+        "DotNetOpenAuth.AspNet", "DotNetOpenAuth.Core",
+        "DotNetOpenAuth.OAuth.Consumer", "DotNetOpenAuth.OAuth.Core",
+        "DotNetOpenAuth.OpenId.Core", "DotNetOpenAuth.OpenId.RelyingParty",
+        # OData / Spatial — legacy, replaced by newer packages
+        "Microsoft.Data.Edm", "Microsoft.Data.OData", "System.Spatial",
+        # Frontend/bundling — not needed in API-only .NET 8
+        "WebGrease", "Antlr", "Antlr3.Runtime", "Modernizr", "Respond",
+        "jQuery", "jQuery.UI.Combined", "jQuery.Validation",
+        "Microsoft.jQuery.Unobtrusive.Ajax", "Microsoft.jQuery.Unobtrusive.Validation",
+        "knockoutjs", "bootstrap",
+        # HTTP client — built into .NET Core
+        "Microsoft.Net.Http",
+    }
+
+    # Package mapping: old package → (new package name, new version)
+    package_mapping: dict[str, tuple[str, str]] = {
+        "EntityFramework": ("Microsoft.EntityFrameworkCore.SqlServer", "8.0.0"),
+        "Newtonsoft.Json": ("Newtonsoft.Json", "13.0.3"),
+    }
+
+    # Read packages.config if present and merge into refs
+    project_refs: list[str] = []
+    if project_path:
+        packages_config = project_path.parent / "packages.config"
+        if packages_config.exists():
+            text = packages_config.read_text(encoding="utf-8", errors="ignore")
+            for match in re.finditer(r'id="([^"]+)".*?version="([^"]+)"', text):
+                name, version = match.group(1), match.group(2)
+                if name in dead_packages:
+                    continue
+                # Apply mapping — replace old package with new equivalent
+                if name in package_mapping:
+                    new_name, new_version = package_mapping[name]
+                    if new_name not in existing_refs:
+                        existing_refs[new_name] = new_version
+                elif name not in existing_refs:
+                    existing_refs[name] = version
+
+        # Also filter dead packages from existing_refs
+        for dead in dead_packages:
+            existing_refs.pop(dead, None)
+        # Apply mapping to existing_refs too
+        for old_name, (new_name, new_version) in package_mapping.items():
+            if old_name in existing_refs:
+                existing_refs.pop(old_name)
+                if new_name not in existing_refs:
+                    existing_refs[new_name] = new_version
+
+        # Read project references from original csproj — most reliable source
+        for match in re.finditer(
+            r'<ProjectReference\s+Include="([^"]+)"',
+            project_xml, re.IGNORECASE
+        ):
+            ref_path = match.group(1).replace("\\", os.sep).replace("/", os.sep)
+            # Resolve relative to original project location, then remap to migrated root
+            if project_path:
+                original_ref = (project_path.parent / ref_path).resolve()
+                # Find the matching csproj in migrated root
+                migrated_root = project_path.parent.parent
+                for sibling in migrated_root.rglob("*.csproj"):
+                    if sibling.name == original_ref.name and sibling != project_path:
+                        if str(sibling) not in project_refs:
+                            project_refs.append(str(sibling))
+                        break
+
+    assembly_info_line = "\n    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>" if has_assembly_info else ""
 
     # Detect if already SDK-style — just update TargetFramework
     if re.search(r'<Project\s+Sdk=', project_xml):
@@ -577,7 +1229,12 @@ def _convert_csproj_to_sdk_style(project_xml: str, target_framework: str) -> str
         if "<ImplicitUsings>" not in updated:
             updated = updated.replace(
                 f'<TargetFramework>{target_framework}</TargetFramework>',
-                f'<TargetFramework>{target_framework}</TargetFramework>\n    <ImplicitUsings>enable</ImplicitUsings>\n    <Nullable>enable</Nullable>'
+                f'<TargetFramework>{target_framework}</TargetFramework>\n    <ImplicitUsings>enable</ImplicitUsings>\n    <Nullable>enable</Nullable>{assembly_info_line}'
+            )
+        elif has_assembly_info and "<GenerateAssemblyInfo>" not in updated:
+            updated = updated.replace(
+                "<Nullable>enable</Nullable>",
+                f"<Nullable>enable</Nullable>{assembly_info_line}"
             )
         return updated
 
@@ -590,13 +1247,21 @@ def _convert_csproj_to_sdk_style(project_xml: str, target_framework: str) -> str
         )
         item_group = f"\n\n  <ItemGroup>\n{refs}\n  </ItemGroup>"
 
+    proj_ref_group = ""
+    if project_refs and project_path:
+        proj_refs_xml = "\n".join(
+            f'    <ProjectReference Include="{os.path.relpath(p, project_path.parent)}" />'
+            for p in project_refs
+        )
+        proj_ref_group = f"\n\n  <ItemGroup>\n{proj_refs_xml}\n  </ItemGroup>"
+
     return (
         f'<Project Sdk="{sdk}">\n\n'
         "  <PropertyGroup>\n"
         f"    <TargetFramework>{target_framework}</TargetFramework>\n"
         "    <ImplicitUsings>enable</ImplicitUsings>\n"
-        "    <Nullable>enable</Nullable>\n"
+        f"    <Nullable>enable</Nullable>{assembly_info_line}\n"
         "  </PropertyGroup>"
-        f"{item_group}\n\n"
+        f"{item_group}{proj_ref_group}\n\n"
         "</Project>\n"
     )
