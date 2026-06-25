@@ -515,10 +515,25 @@ class ReportGenerationAgent(StructuredMigrationAgent):
             "",
             "### Step 2 — Run EF Core Migrations",
             "",
+        ]
+
+        # Detect if multiple DbContexts exist — need --context flag
+        ef_context_flag = ""
+        if migrated_source:
+            cs_files = list(Path(migrated_source).rglob("*.cs"))
+            ctx_count = sum(
+                1 for f in cs_files
+                if not any(p in f.parts for p in {"bin", "obj"})
+                and re.search(r'class\s+\w+\s*:\s*(?:IdentityDbContext|DbContext)', f.read_text(encoding="utf-8", errors="ignore"))
+            )
+            if ctx_count > 1:
+                ef_context_flag = " --context ApplicationDbContext"
+
+        lines += [
             f"```",
             f"cd \"{migrated_source}\"",
-            "dotnet ef migrations add Initial",
-            "dotnet ef database update",
+            f"dotnet ef migrations add Initial{ef_context_flag}",
+            f"dotnet ef database update{ef_context_flag}",
             "```",
             "",
             "### Step 3 — Run SQL Script (if exists)",

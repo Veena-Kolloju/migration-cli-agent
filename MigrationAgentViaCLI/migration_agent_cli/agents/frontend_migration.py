@@ -354,8 +354,8 @@ def _convert_angularjs_services(
             remove_method = "delete"
             lines += [
                 f"// Auto-generated from AngularJS {svc_name}",
-                f"export const {js_name} = {{",
-                f"  getAll: () => api.get('{clean_url}/list'),",
+                f"const {js_name} = {{",
+                f"  getAll: () => api.get('{clean_url}/menuservice_1'),",
                 f"  getById: (id) => api.get(`{clean_url}/${{id}}`),",
                 f"  save: (data) => api.post('{clean_url}', data),",
                 f"  update: (id, data) => api.put(`{clean_url}/${{id}}`, data),",
@@ -367,7 +367,8 @@ def _convert_angularjs_services(
 
         out_name = svc_file.stem.replace("-service", "Service").replace("-", "_")
         out_file = services_dir / f"{_to_pascal_case(out_name)}.js"
-        out_file.write_text("\n".join(lines), encoding="utf-8")
+        lines_with_import = ["import api from './api';", ""] + lines[2:]
+        out_file.write_text("\n".join(lines_with_import), encoding="utf-8")
         generated.append(str(out_file))
         logs.append(f"Converted AngularJS service {svc_file.name} → {out_file.name}")
 
@@ -566,14 +567,18 @@ def _angularjs_template_to_jsx(html: str) -> str:
     html = re.sub(r'style="([^"]+)"', _style_str_to_jsx, html)
 
     # Convert existing single-brace style={...} → style={{...}}
-    # Use a pattern that handles quoted strings containing special chars
+    # Handles: style={border: "1px"} → style={{border: "1px"}}
     def _fix_single_brace_style(m: re.Match) -> str:
         inner = m.group(1)
         # Already double-braced — skip
         if inner.startswith('{'):
             return m.group(0)
+        # Skip JSX expressions like style={someVar}
+        if re.match(r'^\w+$', inner.strip()):
+            return m.group(0)
         return 'style={{' + inner + '}}'
-    html = re.sub(r'style=\{((?:[^{}]|"[^"]*"|\'[^\']*\')+)\}', _fix_single_brace_style, html)
+    # Match style={...} where content is CSS properties (contains colon)
+    html = re.sub(r'style=\{([^{}]+:[^{}]+)\}', _fix_single_brace_style, html)
 
     # Merge duplicate style attributes: style={{a}} style={{b}} → style={{a, b}}
     def _merge_styles(m: re.Match) -> str:
