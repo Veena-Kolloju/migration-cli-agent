@@ -18,6 +18,10 @@ class OrchestratorAgent(MigrationAgent):
     def execute(self, context: AgentExecutionContext) -> AgentExecutionResult:
         started = datetime.now(timezone.utc)
         logs = ["Starting .NET migration workflow."]
+        target_frontend = context.input_data.get("targetFrontend", "react")
+        target_architecture = "decoupled-spa" if target_frontend == "react" else "default"
+        output_structure = "monorepo" if target_frontend == "react" else "default"
+        logs.append(f"Migration target frontend: {target_frontend}, architecture: {target_architecture}, structure: {output_structure}.")
         shared_state: dict[str, Any] = {}
         agent_results: list[dict[str, Any]] = []
         agent_ids = context.input_data.get("agents", [])

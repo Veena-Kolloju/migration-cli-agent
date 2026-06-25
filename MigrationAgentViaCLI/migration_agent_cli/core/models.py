@@ -12,7 +12,7 @@ AgentStatus = Literal["completed", "failed", "partial", "skipped"]
 
 
 class AgentExecutionContext(BaseModel):
-    run_id: str = Field(default_factory=lambda: f"run-{uuid4().hex[:12]}")
+    run_id: str = Field(default_factory=lambda: f"run-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid4().hex[:6]}")
     agent_id: str
     input_data: dict[str, Any] = Field(default_factory=dict)
     shared_state: dict[str, Any] = Field(default_factory=dict)
@@ -80,6 +80,15 @@ class WorkflowInput(BaseModel):
     target_framework: str = Field(default="net8.0", alias="targetFramework")
     agents: list[str]
     output_dir: str = Field(default="artifacts", alias="outputDir")
+    target_frontend: str = Field(default="react", alias="targetFrontend")
     dry_run: bool = Field(default=False, alias="dryRun")
     continue_on_error: bool = Field(default=True, alias="continueOnError")
+
+    @property
+    def target_architecture(self) -> str:
+        return "decoupled-spa" if self.target_frontend == "react" else "default"
+
+    @property
+    def output_structure(self) -> str:
+        return "monorepo" if self.target_frontend == "react" else "default"
 

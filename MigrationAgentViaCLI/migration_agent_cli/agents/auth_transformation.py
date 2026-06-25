@@ -52,10 +52,28 @@ class AuthTransformationAgent(StructuredMigrationAgent):
         if app_user_path:
             generated_files.append(app_user_path)
 
-        # Step 4 — Update DbContext to extend IdentityDbContext
+        # Step 3b — Delete old EF6 generated files that conflict with EF Core
+        ef6_dead_names = {"SampleModel.Context.cs", "SampleModel.cs", "SampleModel.Designer.cs",
+                          "SampleModel.Context.tt", "SampleModel.tt"}
+        for f in root.rglob("*"):
+            if f.is_file() and f.name in ef6_dead_names and not any(p in f.parts for p in {"bin", "obj"}):
+                f.unlink()
+                deleted_files.append(str(f))
+                logs.append(f"Deleted EF6 generated file: {f.name}.")
+
+        # Step 4 — Generate fresh ApplicationDbContext with DbSet properties from EDMX entities
+        edmx_entities = context.shared_state.get("ef-migration", {}).get("edmxEntityNames", [])
+        app_ctx_path = _generate_application_db_context(root, edmx_entities, logs)
+        if app_ctx_path:
+            generated_files.append(app_ctx_path)
+            changed_files.append(app_ctx_path)
+
+        # Step 4b — Update any remaining DbContext files to extend IdentityDbContext
         for cs_file in root.rglob("*.cs"):
             if any(p in cs_file.parts for p in {"bin", "obj"}):
                 continue
+            if cs_file.name == "ApplicationDbContext.cs":
+                continue  # already generated fresh above
             original = cs_file.read_text(encoding="utf-8", errors="ignore")
             updated = _update_db_context(original)
             if updated != original:
@@ -125,11 +143,21 @@ def _add_identity_packages(csproj_xml: str) -> str:
         ('Microsoft.AspNetCore.Identity.EntityFrameworkCore', '8.0.0'),
         ('Microsoft.AspNetCore.Authentication.JwtBearer', '8.0.0'),
         ('System.IdentityModel.Tokens.Jwt', '7.3.1'),
+        ('Microsoft.EntityFrameworkCore.Tools', '8.0.0'),
+        ('Microsoft.EntityFrameworkCore.Design', '8.0.0'),
     ]
     updated = csproj_xml
     for pkg_name, version in packages_to_add:
         if pkg_name not in updated:
-            ref = f'    <PackageReference Include="{pkg_name}" Version="{version}" />'
+            # EF Tools and Design need PrivateAssets
+            if pkg_name in ('Microsoft.EntityFrameworkCore.Tools', 'Microsoft.EntityFrameworkCore.Design'):
+                ref = (
+                    f'    <PackageReference Include="{pkg_name}" Version="{version}">\n'
+                    f'      <PrivateAssets>all</PrivateAssets>\n'
+                    f'    </PackageReference>'
+                )
+            else:
+                ref = f'    <PackageReference Include="{pkg_name}" Version="{version}" />'
             if "<ItemGroup>" in updated:
                 updated = updated.replace("<ItemGroup>", f"<ItemGroup>\n{ref}", 1)
             else:
@@ -143,6 +171,37 @@ def _add_identity_packages(csproj_xml: str) -> str:
 # ---------------------------------------------------------------------------
 # Step 3 — Generate ApplicationUser.cs
 # ---------------------------------------------------------------------------
+
+def _generate_application_db_context(root: Path, entity_names: list[str], logs: list[str]) -> str | None:
+    """Generate a fresh ApplicationDbContext with DbSet properties for all EDMX entities."""
+    namespace = _detect_namespace(root)
+    out_path = root / "Models" / "ApplicationDbContext.cs"
+    out_path.parent.mkdir(exist_ok=True)
+
+    # Deduplicate entity names to avoid duplicate DbSet properties
+    seen: set[str] = set()
+    unique_entities = [e for e in entity_names if not (e in seen or seen.add(e))]
+
+    dbsets = ""
+    for entity in unique_entities:
+        dbsets += f"\n        public virtual DbSet<{entity}> {entity} {{ get; set; }}"
+
+    content = f"""using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
+
+namespace {namespace}.Models
+{{
+    public class ApplicationDbContext : IdentityDbContext<ApplicationUser>
+    {{
+        public ApplicationDbContext(DbContextOptions<ApplicationDbContext> options)
+            : base(options) {{ }}{dbsets}
+    }}
+}}
+"""
+    out_path.write_text(content, encoding="utf-8")
+    logs.append(f"Generated ApplicationDbContext.cs with {len(unique_entities)} DbSet(s): {', '.join(unique_entities) or 'none'}.")
+    return str(out_path)
+
 
 def _generate_application_user(root: Path, logs: list[str]) -> str | None:
     # Detect namespace from any existing .cs file
@@ -175,8 +234,10 @@ namespace {namespace}.Models
 # ---------------------------------------------------------------------------
 
 def _update_db_context(source: str) -> str:
-    # Only touch files that have DbContext and look like EF Core context
-    if "DbContext" not in source or "IdentityDbContext" in source:
+    # Only touch files that define a class inheriting DbContext — not controllers that use it
+    if "IdentityDbContext" in source:
+        return source
+    if not re.search(r'class\s+\w+\s*:\s*DbContext', source):
         return source
 
     updated = source
@@ -502,9 +563,8 @@ def _detect_namespace(root: Path) -> str:
             content = cs_file.read_text(encoding="utf-8", errors="ignore")
             match = re.search(r'namespace\s+([\w.]+)', content)
             if match:
-                # Return root namespace (first segment)
-                return match.group(1).split(".")[0] + "." + match.group(1).split(".")[1] \
-                    if "." in match.group(1) else match.group(1)
+                # Return only the root namespace segment (e.g. MvcApplication1)
+                return match.group(1).split(".")[0]
         except Exception:
             continue
     return "MvcApplication1"

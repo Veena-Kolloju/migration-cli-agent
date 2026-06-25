@@ -24,31 +24,23 @@ class EfMigrationAgent(StructuredMigrationAgent):
         migrated_root = context.shared_state.get("project-conversion", {}).get("migratedSourcePath")
         if not migrated_root:
             logs.append("No migrated source path — skipping EF migration.")
-            return {"migratedContexts": [], "removedEdmxFiles": [], "changedFiles": []}
+            return {"migratedContexts": [], "removedEdmxFiles": [], "changedFiles": [], "edmxEntityNames": []}
 
         root = Path(migrated_root)
         migrated_contexts: list[str] = []
         removed_edmx: list[str] = []
         changed_files: list[str] = []
+        edmx_entity_names: list[str] = []
 
-        # Find and remove EDMX files
-        for edmx_file in root.rglob("*.edmx"):
+        # EDMX files are excluded from target copy — scan source-code/ reference snapshot instead
+        source_code_path = context.shared_state.get("project-conversion", {}).get("sourceCodePath")
+        edmx_search_root = Path(source_code_path) if source_code_path else root
+        for edmx_file in edmx_search_root.rglob("*.edmx"):
             if any(p in edmx_file.parts for p in {"bin", "obj"}):
                 continue
-            edmx_file.unlink()
+            edmx_entity_names.extend(_extract_entity_names_from_edmx(edmx_file, logs))
             removed_edmx.append(edmx_file.name)
-            logs.append(f"Removed EDMX file: {edmx_file.name}.")
-
-            # Remove associated .tt and .Designer.cs files
-            for associated in [
-                edmx_file.with_suffix(".edmx.diagram"),
-                edmx_file.parent / f"{edmx_file.stem}.Context.tt",
-                edmx_file.parent / f"{edmx_file.stem}.tt",
-                edmx_file.parent / f"{edmx_file.stem}.Designer.cs",
-            ]:
-                if associated.exists():
-                    associated.unlink()
-                    logs.append(f"Removed associated file: {associated.name}.")
+            logs.append(f"Found EDMX file: {edmx_file.name} (entity names extracted for DbSet generation).")
 
         # Migrate DbContext files — scan ALL .cs files for classes inheriting DbContext
         for cs_file in root.rglob("*.cs"):
@@ -63,7 +55,7 @@ class EfMigrationAgent(StructuredMigrationAgent):
             # Must have a class that inherits DbContext (directly or via IdentityDbContext)
             if not re.search(r'class\s+\w+\s*:\s*(?:IdentityDbContext|DbContext)', original):
                 continue
-            migrated = _migrate_dbcontext(original, cs_file.stem, logs)
+            migrated = _migrate_dbcontext(original, cs_file.stem, logs, edmx_entity_names)
             if migrated != original:
                 cs_file.write_text(migrated, encoding="utf-8")
                 changed_files.append(str(cs_file))
@@ -116,10 +108,34 @@ class EfMigrationAgent(StructuredMigrationAgent):
             "migratedContexts": migrated_contexts,
             "removedEdmxFiles": removed_edmx,
             "changedFiles": changed_files,
+            "edmxEntityNames": edmx_entity_names,
         }
 
 
-def _migrate_dbcontext(source: str, filename: str, logs: list[str]) -> str:
+def _extract_entity_names_from_edmx(edmx_file: Path, logs: list[str]) -> list[str]:
+    """Extract entity type names from EDMX XML before deletion."""
+    import xml.etree.ElementTree as ET
+    entity_names: list[str] = []
+    try:
+        tree = ET.parse(str(edmx_file))
+        root = tree.getroot()
+        # EDMX namespace varies — search all elements for EntityType
+        # Only look in CSDL (ConceptualModels) to avoid duplicates from SSDL
+        seen: set[str] = set()
+        for elem in root.iter():
+            if elem.tag.endswith("EntityType"):
+                name = elem.get("Name")
+                if name and name not in seen:
+                    seen.add(name)
+                    entity_names.append(name)
+    except Exception as exc:
+        logs.append(f"Could not parse EDMX {edmx_file.name} for entity names: {exc}")
+    if entity_names:
+        logs.append(f"Extracted {len(entity_names)} entity types from {edmx_file.name}: {', '.join(entity_names)}.")
+    return entity_names
+
+
+def _migrate_dbcontext(source: str, filename: str, logs: list[str], edmx_entity_names: list[str] | None = None) -> str:
     updated = source
 
     # Replace using System.Data.Entity → Microsoft.EntityFrameworkCore
@@ -175,6 +191,20 @@ def _migrate_dbcontext(source: str, filename: str, logs: list[str]) -> str:
     # Add EF Core using
     if "using Microsoft.EntityFrameworkCore;" not in updated:
         updated = "using Microsoft.EntityFrameworkCore;\n" + updated
+
+    # Gap 5 — Ensure DbSet<T> properties exist for all EDMX entities
+    if edmx_entity_names:
+        for entity_name in edmx_entity_names:
+            dbset_prop = f"DbSet<{entity_name}>"
+            if dbset_prop not in updated:
+                # Insert before closing brace of class
+                insert_line = f"\n        public virtual DbSet<{entity_name}> {entity_name} {{ get; set; }}"
+                updated = re.sub(
+                    r'(protected override void OnConfiguring)',
+                    insert_line + r'\n\n        \1',
+                    updated, count=1
+                )
+                logs.append(f"Added DbSet<{entity_name}> to DbContext from EDMX.")
 
     return updated
 

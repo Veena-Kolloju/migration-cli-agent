@@ -10,6 +10,12 @@ from typing import Any
 # Applied in order via regex substitution on each .cs file
 # ---------------------------------------------------------------------------
 CS_TRANSFORMATION_RULES: list[tuple[str, str, str]] = [
+    # Gap 2 — Session-based auth checks → [Authorize] TODO comment
+    (
+        r'if\s*\(\s*Session\s*\[\s*["\'][^"\']*(user|login|auth)[^"\']*(\s*["\'])?\s*\]\s*==\s*null\s*\)',
+        r'// TODO: Replace session auth check with [Authorize] attribute — JWT handles this automatically\n            if (false /* session check removed */)',
+        "Session auth check → [Authorize] TODO",
+    ),
     # ConfigurationManager → IConfiguration
     (
         r'ConfigurationManager\.AppSettings\[([^\]]+)\]',

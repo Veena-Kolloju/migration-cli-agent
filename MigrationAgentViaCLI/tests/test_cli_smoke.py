@@ -51,5 +51,5 @@ def test_workflow_migrates_sample_copy(tmp_path, monkeypatch):
     )
 
     assert result.exit_code == 0
-    assert "migrated-source" in result.stdout
-    assert list(tmp_path.glob("*/migrated-source/LegacyWebApp/LegacyWebApp.csproj"))
+    assert "migration-code" in result.stdout
+    assert list(tmp_path.glob("*/migration-code/target-code/backend/LegacyWebApp/LegacyWebApp.csproj"))

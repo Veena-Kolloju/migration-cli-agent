@@ -2,6 +2,7 @@
   "workflowId": "dotnet-migration",
   "sourcePath": "C:\\VS Code\\Ankita\\Migration_Agent_test_project7\\AngularJs-with-asp.net-Mvc\\AngularJs-with-asp.net-Mvc",
   "targetFramework": "net8.0",
+  "targetFrontend": "react",
   "agents": [
     "repository-analysis",
     "assessment",

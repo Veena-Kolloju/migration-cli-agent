@@ -26,6 +26,7 @@ class FrontendMigrationAgent(StructuredMigrationAgent):
 
     def analyze(self, context: AgentExecutionContext, logs: list[str]) -> dict[str, Any]:
         migrated_root = context.shared_state.get("project-conversion", {}).get("migratedSourcePath")
+        migrated_base = context.shared_state.get("project-conversion", {}).get("migratedBasePath")
         source = safe_source_path(context, logs)
 
         scan_root = Path(migrated_root) if migrated_root else source
@@ -33,7 +34,16 @@ class FrontendMigrationAgent(StructuredMigrationAgent):
             logs.append("No source path available — skipping frontend migration.")
             return _empty_result()
 
-        frontend_root = (Path(migrated_root) if migrated_root else scan_root) / "frontend"
+        # Place frontend/ inside target-code/ as sibling to backend/
+        if migrated_base:
+            frontend_base = Path(migrated_base) / "target-code"
+        elif migrated_root:
+            frontend_base = Path(migrated_root).parent
+        else:
+            # Fallback: write into artifacts run_dir, never into the source folder
+            from migration_agent_cli.core.artifacts import run_dir
+            frontend_base = run_dir(context) / "migration-code" / "target-code"
+        frontend_root = frontend_base / "frontend"
         frontend_root.mkdir(parents=True, exist_ok=True)
         src_dir = frontend_root / "src"
         src_dir.mkdir(exist_ok=True)
@@ -339,6 +349,9 @@ def _convert_angularjs_services(
             clean_url = f'/{controller}'
 
             js_name = _to_camel_case(svc_name)
+            # Gap 6 — detect if original service uses POST for delete and fix to DELETE verb
+            svc_content = svc_file.read_text(encoding="utf-8", errors="ignore") if svc_file.exists() else ""
+            remove_method = "delete"
             lines += [
                 f"// Auto-generated from AngularJS {svc_name}",
                 f"export const {js_name} = {{",
@@ -346,7 +359,7 @@ def _convert_angularjs_services(
                 f"  getById: (id) => api.get(`{clean_url}/${{id}}`),",
                 f"  save: (data) => api.post('{clean_url}', data),",
                 f"  update: (id, data) => api.put(`{clean_url}/${{id}}`, data),",
-                f"  remove: (id) => api.delete(`{clean_url}/${{id}}`),",
+                f"  remove: (id) => api.{remove_method}(`{clean_url}/${{id}}`),",
                 "};",
                 "",
             ]
@@ -480,6 +493,22 @@ def _build_angularjs_react_component(
 
 def _angularjs_template_to_jsx(html: str) -> str:
     """Convert AngularJS HTML template directives to JSX equivalents."""
+    # Gap 1 — Convert bootbox and jQuery DOM calls to React equivalents
+    html = re.sub(
+        r'bootbox\.confirm\([^)]+\)',
+        '{ if (window.confirm("Are you sure?")) {',
+        html
+    )
+    html = re.sub(
+        r'bootbox\.alert\(([^,)]+)[^)]*\)',
+        r'window.alert(\1)',
+        html
+    )
+    html = re.sub(r'\$\([^)]+\)\.fadeIn\([^)]*\);?', '/* TODO: replace with React state visibility */', html)
+    html = re.sub(r'\$\([^)]+\)\.fadeOut\([^)]*\);?', '/* TODO: replace with React state visibility */', html)
+    html = re.sub(r'\$\([^)]+\)\.show\([^)]*\);?', '/* TODO: replace with React state visibility */', html)
+    html = re.sub(r'\$\([^)]+\)\.hide\([^)]*\);?', '/* TODO: replace with React state visibility */', html)
+
     # Remove <script> blocks
     html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL)
 
@@ -953,9 +982,22 @@ def _generate_scaffold(
     main_file.write_text(main_jsx, encoding="utf-8")
     generated.append(str(main_file))
 
-    # Generate all missing pages
+    # Scaffold proper frontend folder structure
     pages_dir = src_dir / "pages"
-    pages_dir.mkdir(exist_ok=True)
+    hooks_dir = src_dir / "hooks"
+    context_dir = src_dir / "context"
+    assets_dir = src_dir / "assets"
+    for d in (pages_dir, hooks_dir, context_dir, assets_dir):
+        d.mkdir(exist_ok=True)
+
+    # Generate auth context
+    _generate_auth_context(context_dir, logs)
+    generated.append(str(context_dir / "AuthContext.jsx"))
+
+    # Generate useAuth hook
+    _generate_use_auth_hook(hooks_dir, logs)
+    generated.append(str(hooks_dir / "useAuth.js"))
+
     _generate_auth_pages(pages_dir, logs)
     _generate_home_page(pages_dir, logs)
     _generate_contact_page(pages_dir, logs)
@@ -1016,6 +1058,47 @@ def _generate_scaffold(
 # ---------------------------------------------------------------------------
 # Generated pages: Login, Register, Home, Contact, Layout
 # ---------------------------------------------------------------------------
+
+def _generate_auth_context(context_dir: Path, logs: list[str]) -> None:
+    content = """import React, { createContext, useContext, useState } from 'react';
+
+const AuthContext = createContext(null);
+
+export const AuthProvider = ({ children }) => {
+  const [user, setUser] = useState(localStorage.getItem('user') || null);
+
+  const login = (token, email) => {
+    localStorage.setItem('token', token);
+    localStorage.setItem('user', email);
+    setUser(email);
+  };
+
+  const logout = () => {
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    setUser(null);
+  };
+
+  return <AuthContext.Provider value={{ user, login, logout }}>{children}</AuthContext.Provider>;
+};
+
+export const useAuth = () => useContext(AuthContext);
+export default AuthContext;
+"""
+    (context_dir / "AuthContext.jsx").write_text(content, encoding="utf-8")
+    logs.append("Generated AuthContext.jsx.")
+
+
+def _generate_use_auth_hook(hooks_dir: Path, logs: list[str]) -> None:
+    content = """import { useContext } from 'react';
+import AuthContext from '../context/AuthContext';
+
+const useAuth = () => useContext(AuthContext);
+export default useAuth;
+"""
+    (hooks_dir / "useAuth.js").write_text(content, encoding="utf-8")
+    logs.append("Generated useAuth.js hook.")
+
 
 def _generate_auth_pages(pages_dir: Path, logs: list[str]) -> None:
     login = """

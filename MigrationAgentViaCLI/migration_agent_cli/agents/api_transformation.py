@@ -86,6 +86,20 @@ class ApiTransformationAgent(StructuredMigrationAgent):
 def _transform_controller_to_api(source: str, filename: str, logs: list[str]) -> str:
     updated = source
 
+    # Gap 3 — Resolve duplicate method names before transformation
+    updated = _resolve_duplicate_method_names(updated, logs)
+
+    # Replace EF6 field-instantiated DbContext with DI constructor injection
+    updated = _replace_ef6_context_with_di(updated, logs)
+
+    # Detect root namespace and inject Models using so ApplicationDbContext + entity types resolve
+    ns_match = re.search(r'namespace\s+([\w.]+)', updated)
+    if ns_match:
+        root_ns = ns_match.group(1).split(".")[0]
+        models_using = f"using {root_ns}.Models;"
+        if models_using not in updated:
+            updated = models_using + "\n" + updated
+
     # Add using statements for API
     api_usings = [
         "using Microsoft.AspNetCore.Mvc;",
@@ -181,6 +195,77 @@ def _transform_controller_to_api(source: str, filename: str, logs: list[str]) ->
         updated
     )
 
+    return updated
+
+
+def _replace_ef6_context_with_di(source: str, logs: list[str]) -> str:
+    """Replace EF6 field-instantiated DbContext with DI constructor injection of ApplicationDbContext."""
+    # Match: SomeDbContextName db = new SomeDbContextName();
+    # or:    private SomeDbContextName db = new SomeDbContextName();
+    field_pattern = re.compile(
+        r'(private\s+)?(?P<ctx_type>\w+)\s+(?P<field>\w+)\s*=\s*new\s+(?P=ctx_type)\s*\(\s*\);',
+        re.MULTILINE
+    )
+
+    # Find controller class name for constructor generation
+    class_match = re.search(r'public\s+class\s+(\w+Controller)', source)
+    class_name = class_match.group(1) if class_match else None
+
+    updated = source
+    for m in field_pattern.finditer(source):
+        ctx_type = m.group('ctx_type')
+        field_name = m.group('field')
+        # Skip if already ApplicationDbContext or if type looks like a non-DbContext (e.g. plain models)
+        if ctx_type in ('ApplicationDbContext', 'string', 'int', 'bool', 'List'):
+            continue
+        if not class_name:
+            continue
+        # Replace the field instantiation with a readonly field + constructor
+        di_injection = (
+            f"private readonly ApplicationDbContext {field_name};\n"
+            f"        public {class_name}(ApplicationDbContext context) {{ {field_name} = context; }}"
+        )
+        updated = updated.replace(m.group(0), di_injection, 1)
+        logs.append(f"Replaced '{ctx_type} {field_name} = new {ctx_type}()' with DI-injected ApplicationDbContext.")
+        break  # one DbContext field per controller
+
+    return updated
+
+
+def _resolve_duplicate_method_names(source: str, logs: list[str]) -> str:
+    """Detect and rename duplicate public method names to avoid CS0111 build errors."""
+    # Find all public method signatures with their positions
+    pattern = re.compile(
+        r'(public\s+(?:async\s+)?(?:[\w<>]+)\s+(\w+)\s*\([^)]*\))',
+        re.MULTILINE
+    )
+    name_counts: dict[str, int] = {}
+    for m in pattern.finditer(source):
+        name = m.group(2)
+        name_counts[name] = name_counts.get(name, 0) + 1
+
+    updated = source
+    for name, count in name_counts.items():
+        if count < 2:
+            continue
+        # Rename by inferring verb from context — GET vs POST duplicate
+        # Replace second occurrence: add verb suffix based on [HttpPost]/[HttpGet] above it
+        occurrences = [(m.start(), m.group(0), m.group(2)) for m in pattern.finditer(updated) if m.group(2) == name]
+        for idx, (pos, full_sig, method_name) in enumerate(occurrences):
+            if idx == 0:
+                continue  # keep first as-is
+            preceding = updated[:pos]
+            if re.search(r'\[HttpPost\]', preceding[-300:]):
+                new_name = f"Save{method_name}" if not method_name.lower().startswith("save") else f"{method_name}Post"
+            elif re.search(r'\[HttpPut\]', preceding[-300:]):
+                new_name = f"Update{method_name}"
+            elif re.search(r'\[HttpDelete\]', preceding[-300:]):
+                new_name = f"Delete{method_name}"
+            else:
+                new_name = f"{method_name}_{idx}"
+            new_sig = full_sig.replace(f" {method_name}(", f" {new_name}(", 1)
+            updated = updated.replace(full_sig, new_sig, 1)
+            logs.append(f"Renamed duplicate method '{method_name}' → '{new_name}' to avoid CS0111.")
     return updated
 
 

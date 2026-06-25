@@ -34,16 +34,28 @@ class ProjectConversionAgent(StructuredMigrationAgent):
                 "diffPath": None,
             }
 
-        migrated_root = run_dir(context) / "migrated-source"
-        if migrated_root.exists():
-            shutil.rmtree(migrated_root)
+        target_frontend = context.input_data.get("targetFrontend", "react")
+        use_monorepo = target_frontend == "react"
+        migration_base = run_dir(context) / "migration-code"
+        source_code_path = migration_base / "source-code"
+        target_code_path = migration_base / "target-code"
+        migrated_root = target_code_path / "backend" if use_monorepo else target_code_path
+
+        if migration_base.exists():
+            shutil.rmtree(migration_base)
+
+        # Step 1 — Copy full source to source-code/ (read-only reference, never touched again)
         ignore = shutil.ignore_patterns("bin", "obj", ".git", ".vs", "artifacts")
-        shutil.copytree(source, migrated_root, ignore=ignore)
+        _copytree_safe(source, source_code_path, ignore=ignore, logs=logs)
+        logs.append(f"Copied source to source-code/ (reference snapshot).")
+
+        # Step 2 — Selectively copy only useful files to target-code/backend/
+        _selective_copy_to_target(source, migrated_root, logs)
 
         global_json = migrated_root / "global.json"
         if global_json.exists():
             global_json.unlink()
-            logs.append("Removed global.json from migrated-source to avoid SDK version pinning.")
+            logs.append("Removed global.json from target-code to avoid SDK version pinning.")
 
         changed_files: list[str] = []
         converted_projects: list[dict[str, str]] = []
@@ -51,6 +63,9 @@ class ProjectConversionAgent(StructuredMigrationAgent):
 
         for relative_project in projects:
             project_path = migrated_root / relative_project
+            if not project_path.exists():
+                converted_projects.append({"path": relative_project, "status": "notFound"})
+                continue
             original = project_path.read_text(encoding="utf-8", errors="ignore")
             has_assembly_info = any(project_path.parent.rglob("AssemblyInfo.cs"))
 
@@ -83,11 +98,17 @@ class ProjectConversionAgent(StructuredMigrationAgent):
         # Copy static files to wwwroot for each web project
         _setup_wwwroot(migrated_root, logs)
 
+        # Scaffold backend folder structure (Services/, DTOs/, Data/)
+        if use_monorepo:
+            _scaffold_backend_folders(migrated_root, logs)
+
         return {
             "convertedProjects": converted_projects,
             "changedFiles": changed_files,
-            "warnings": ["A migrated copy was created. Review it before replacing the original application."],
+            "warnings": ["migration-code created. source-code/ is your reference. target-code/ is the new application."],
             "migratedSourcePath": str(migrated_root),
+            "migratedBasePath": str(migration_base),
+            "sourceCodePath": str(source_code_path),
             "diffPath": None,
         }
 
@@ -478,19 +499,94 @@ class ReportGenerationAgent(StructuredMigrationAgent):
 
         lines += [
             "",
-            "## Next Actions",
+            "## Next Steps — Follow In Order",
             "",
-            "1. Review converted project files and verify all PackageReferences are correct.",
-            "2. Run `npm install && npm run dev` in the frontend folder to start the React app.",
-            "3. Resolve any remaining build errors listed above.",
-            "4. Update database connection strings in appsettings.json.",
-            "5. Review TODO comments inserted by the code transformation agent.",
-            "6. Run full test suite and fix migration-related failures.",
+            "### Step 1 — Update Connection String",
+            "",
+            f"Open: `{migrated_source}\\appsettings.json`",
+            "",
+            "Replace the `DefaultConnection` value with your actual SQL Server connection string:",
+            "",
+            "```json",
+            '"ConnectionStrings": {',
+            '  "DefaultConnection": "Server=YOUR_SERVER;Database=YOUR_DB;User Id=YOUR_USER;Password=YOUR_PASSWORD;TrustServerCertificate=True"',
+            '}',
+            "```",
+            "",
+            "### Step 2 — Run EF Core Migrations",
+            "",
+            f"```",
+            f"cd \"{migrated_source}\"",
+            "dotnet ef migrations add Initial",
+            "dotnet ef database update",
+            "```",
+            "",
+            "### Step 3 — Run SQL Script (if exists)",
+        ]
+
+        source_path = context.input_data.get("sourcePath")
+        sql_scripts = _find_sql_scripts(source_path, logs) if source_path else []
+        if sql_scripts:
+            lines.append("")
+            lines.append("Run the following SQL scripts manually against your database:")
+            for script in sql_scripts:
+                lines.append(f"  - `{script}`")
+            lines.append("")
+            lines.append("Run them after `dotnet ef database update`.")
+        else:
+            lines.append("")
+            lines.append("No SQL scripts found — skip this step.")
+
+        lines += [
+            "",
+            "### Step 4 — Start the Backend",
+            "",
+            "```",
+            f"cd \"{migrated_source}\"",
+            "dotnet run",
+            "```",
+            "",
+            f"Swagger UI: https://localhost:5001/swagger",
+            "",
+            "### Step 5 — Start the Frontend",
+            "",
+        ]
+
+        if frontend_root:
+            lines += [
+                "```",
+                f"cd \"{frontend_root}\"",
+                "npm install",
+                "npm run dev",
+                "```",
+                "",
+                "Frontend runs at: http://localhost:5173",
+            ]
+        else:
+            lines.append("Frontend was not generated — check frontend-migration agent logs.")
+
+        lines += [
+            "",
+            "### Step 6 — Verify End-to-End",
+            "",
+            "1. Open http://localhost:5173 — Login page should load",
+            "2. Register a user via /register",
+            "3. Login — should receive JWT token",
+            "4. Navigate to /menu — should load menu list from GET /api/menu",
         ]
 
         # Scan TODO comments from migrated source
         todo_items = _scan_todo_comments(migrated_source, logs) if migrated_source else []
+
         if todo_items:
+            lines += ["", "## TODO Items — Manual Review Required", ""]
+            current_file = None
+            for item in todo_items:
+                if item["file"] != current_file:
+                    current_file = item["file"]
+                    rel = current_file.replace(str(migrated_source), "").lstrip("\\/")
+                    lines.append(f"### {rel}")
+                lines.append(f"- Line {item['line']}: {item['message']}")
             lines += ["", "## TODO Items — Manual Review Required", ""]
             current_file = None
             for item in todo_items:
@@ -521,6 +617,41 @@ class ReportGenerationAgent(StructuredMigrationAgent):
                 "manualActionsRequired": len(code_findings) + len(incompatible) + len(build_errors),
             },
         }
+
+
+def _copytree_safe(src: Path, dst: Path, ignore, logs: list[str]) -> None:
+    """copytree that skips files causing WinError 3 (path too long) instead of crashing."""
+    dst.mkdir(parents=True, exist_ok=True)
+    ignored = ignore(str(src), [x.name for x in src.iterdir()]) if src.is_dir() else set()
+    errors = []
+    for item in src.iterdir():
+        if item.name in ignored:
+            continue
+        dest = dst / item.name
+        try:
+            if item.is_dir():
+                _copytree_safe(item, dest, ignore, logs)
+            else:
+                shutil.copy2(item, dest)
+        except Exception as exc:
+            errors.append(str(exc))
+    if errors:
+        logs.append(f"Skipped {len(errors)} files during source copy (path too long or inaccessible).")
+
+
+def _find_sql_scripts(source_path: str, logs: list[str]) -> list[str]:
+    """Find .sql files in the source project for the report."""
+    found: list[str] = []
+    try:
+        for sql_file in Path(source_path).rglob("*.sql"):
+            if any(p in sql_file.parts for p in {"bin", "obj", ".git"}):
+                continue
+            found.append(str(sql_file))
+    except Exception:
+        pass
+    if found:
+        logs.append(f"Found {len(found)} SQL script(s) requiring manual execution.")
+    return found
 
 
 def _scan_todo_comments(migrated_source: str, logs: list[str]) -> list[dict[str, Any]]:
@@ -563,6 +694,80 @@ def _scan_todo_comments(migrated_source: str, logs: list[str]) -> list[dict[str,
     return todo_items
 
 
+# Dead files — never copied to target-code/backend/
+_DEAD_FILENAMES: set[str] = {
+    "Web.config", "Web.Debug.config", "Web.Release.config",
+    "packages.config",
+    "Global.asax",
+    "BundleConfig.cs", "RouteConfig.cs", "FilterConfig.cs", "WebApiConfig.cs",
+    "AccountController.cs", "AuthConfig.cs", "InitializeSimpleMembershipAttribute.cs",
+    "AssemblyInfo.cs",
+    "Startup.cs",
+    # EF6 T4 scaffolded files — replaced by EF Core ApplicationDbContext
+    "SampleModel.Context.cs", "SampleModel.Designer.cs",
+    "SampleModel.Context.tt", "SampleModel.tt",
+}
+
+# Dead folders — never copied to target-code/backend/
+_DEAD_FOLDERS: set[str] = {"Views", "App_Start", "bin", "obj", ".git", ".vs", "artifacts", "frontend", "ext"}
+
+# Useful file extensions to copy
+_USEFUL_EXTENSIONS: set[str] = {
+    ".cs", ".csproj", ".sln", ".json", ".xml",
+}
+
+
+def _selective_copy_to_target(source: Path, target: Path, logs: list[str]) -> None:
+    """Copy only useful files from source to target-code/backend/, skipping all dead legacy files."""
+    target.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    skipped = 0
+    for item in source.rglob("*"):
+        # Skip dead folders
+        if any(part in _DEAD_FOLDERS for part in item.parts):
+            skipped += 1
+            continue
+        # Skip .edmx files
+        if item.suffix == ".edmx":
+            skipped += 1
+            continue
+        # Skip dead filenames
+        if item.name in _DEAD_FILENAMES:
+            skipped += 1
+            continue
+        # Only copy useful extensions (files) or recreate directories
+        if item.is_dir():
+            rel = item.relative_to(source)
+            (target / rel).mkdir(parents=True, exist_ok=True)
+            continue
+        if item.suffix not in _USEFUL_EXTENSIONS:
+            skipped += 1
+            continue
+        rel = item.relative_to(source)
+        dest = target / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(item, dest)
+        except Exception:
+            skipped += 1
+            continue
+        copied += 1
+    logs.append(f"Selective copy complete: {copied} files copied, {skipped} dead/irrelevant files skipped.")
+
+
+def _scaffold_backend_folders(migrated_root: Path, logs: list[str]) -> None:
+    """Create Services/, DTOs/, Data/ folders in the backend project if they don't exist."""
+    for csproj in migrated_root.rglob("*.csproj"):
+        if any(p in csproj.parts for p in {"bin", "obj"}):
+            continue
+        project_dir = csproj.parent
+        for folder in ("Services", "DTOs", "Data"):
+            target = project_dir / folder
+            if not target.exists():
+                target.mkdir(exist_ok=True)
+                logs.append(f"Scaffolded {folder}/ in {csproj.parent.name}.")
+
+
 def _setup_wwwroot(migrated_root: Path, logs: list[str]) -> None:
     """Create wwwroot and copy Content/Scripts/fonts into it for each web project."""
     static_map = {"Content": "css", "Scripts": "js", "fonts": "fonts"}
@@ -579,7 +784,7 @@ def _setup_wwwroot(migrated_root: Path, logs: list[str]) -> None:
                 dest = wwwroot / dest_folder
                 if dest.exists():
                     shutil.rmtree(dest)
-                shutil.copytree(src, dest)
+                _copytree_safe(src, dest, shutil.ignore_patterns(), logs)
                 logs.append(f"Copied {src_folder} → wwwroot/{dest_folder} in {csproj.parent.name}.")
 
 
@@ -721,22 +926,10 @@ def _generate_program_cs_from_global_asax(global_asax: Path, logs: list[str]) ->
         except Exception:
             continue
 
-    # If no IdentityDbContext found, generate a separate ApplicationDbContext for Identity
+    # If no IdentityDbContext found, auth-transformation will generate ApplicationDbContext
+    # with proper DbSets after ef-migration exposes entity names — don't generate it here
     if not db_context_name:
         db_context_name = "ApplicationDbContext"
-        app_db_context_path = project_dir / "Models" / "ApplicationDbContext.cs"
-        app_db_context_path.parent.mkdir(exist_ok=True)
-        app_db_context_path.write_text(
-            "using Microsoft.AspNetCore.Identity.EntityFrameworkCore;\n"
-            "using Microsoft.EntityFrameworkCore;\n\n"
-            "namespace MvcApplication1.Models\n{\n"
-            "    public class ApplicationDbContext : IdentityDbContext<ApplicationUser>\n    {\n"
-            "        public ApplicationDbContext(DbContextOptions<ApplicationDbContext> options)\n"
-            "            : base(options) { }\n"
-            "    }\n}\n",
-            encoding="utf-8",
-        )
-        logs.append("Generated ApplicationDbContext.cs for ASP.NET Core Identity.")
 
     lines = [
         "// Auto-generated Program.cs from Global.asax.cs — review before building",
@@ -862,6 +1055,34 @@ def _attempt_build_fix(error: dict[str, Any], migrated_root: Path, logs: list[st
     if not target.exists():
         target = migrated_root / real_path
     if not target.exists():
+        return None
+
+    # CS0102: duplicate member definition — remove duplicate DbSet properties
+    if code == "CS0102":
+        member_match = re.search(r"already contains a definition for '(\w+)'", message)
+        if member_match:
+            member_name = member_match.group(1)
+            for cs_file in migrated_root.rglob("*.cs"):
+                if any(p in cs_file.parts for p in {"bin", "obj"}):
+                    continue
+                try:
+                    content = cs_file.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    continue
+                # Find and remove duplicate DbSet property lines
+                pattern = re.compile(
+                    rf'(\s*public\s+virtual\s+DbSet<{re.escape(member_name)}>\s+{re.escape(member_name)}\s*{{\s*get;\s*set;\s*}})',
+                    re.MULTILINE
+                )
+                matches = list(pattern.finditer(content))
+                if len(matches) >= 2:
+                    # Remove all but the first occurrence
+                    updated = content
+                    for m in reversed(matches[1:]):
+                        updated = updated[:m.start()] + updated[m.end():]
+                    cs_file.write_text(updated, encoding="utf-8")
+                    logs.append(f"Removed duplicate DbSet<{member_name}> from {cs_file.name}.")
+                    return {"file": str(cs_file), "code": code, "fix": f"Removed duplicate DbSet<{member_name}>"}
         return None
 
     # CS0579: duplicate assembly attribute — add GenerateAssemblyInfo=false to csproj

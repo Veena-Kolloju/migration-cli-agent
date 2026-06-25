@@ -420,6 +420,8 @@ def report_llm_usage(agent_title: str, agentic_review: dict, logs: list[str]) ->
     total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
     if total_tokens:
         logs.append(f"LLM_USAGE: {agent_title} — prompt_tokens={prompt_tokens}, completion_tokens={completion_tokens}, total={total_tokens}.")
+    elif agentic_review.get("provider") == "skipped":
+        logs.append(f"LLM_USAGE: {agent_title} — skipped (mechanical agent), tokens=0.")
     return {
         "agent": agent_title,
         "promptTokens": prompt_tokens,
@@ -435,9 +437,35 @@ def report_llm_usage(agent_title: str, agentic_review: dict, logs: list[str]) ->
 def write_audit_trail(run_id: str, output_dir: str, agent_results: list[dict], logs: list[str]) -> str:
     """Write consolidated audit trail for the migration run."""
     from datetime import datetime, timezone
+
+    # Aggregate token usage across all agents
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+    per_agent_tokens: list[dict] = []
+    for r in agent_results:
+        usage = r.get("output", {}).get("agenticReview", {}).get("usage", {})
+        pt = usage.get("prompt_tokens", 0)
+        ct = usage.get("completion_tokens", 0)
+        total_prompt_tokens += pt
+        total_completion_tokens += ct
+        per_agent_tokens.append({
+            "agentId": r.get("agent_id"),
+            "promptTokens": pt,
+            "completionTokens": ct,
+            "totalTokens": pt + ct,
+        })
+
+    total_tokens = total_prompt_tokens + total_completion_tokens
+
     audit = {
         "runId": run_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "tokenConsumption": {
+            "totalPromptTokens": total_prompt_tokens,
+            "totalCompletionTokens": total_completion_tokens,
+            "totalTokens": total_tokens,
+            "perAgent": per_agent_tokens,
+        },
         "agentsSummary": [
             {
                 "agentId": r.get("agent_id"),
@@ -457,5 +485,5 @@ def write_audit_trail(run_id: str, output_dir: str, agent_results: list[dict], l
     }
     audit_path = Path(output_dir) / "audit.json"
     audit_path.write_text(json.dumps(audit, indent=2, default=str), encoding="utf-8")
-    logs.append(f"Audit trail written to {audit_path}.")
+    logs.append(f"Audit trail written to {audit_path}. Total tokens used: {total_tokens}.")
     return str(audit_path)
