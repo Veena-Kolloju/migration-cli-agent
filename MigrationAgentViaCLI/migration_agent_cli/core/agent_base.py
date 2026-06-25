@@ -32,6 +32,8 @@ class StructuredMigrationAgent(MigrationAgent):
             output = self.analyze(context, logs)
             logs.append("Running mandatory Microsoft Agent Framework LLM review.")
             output["agenticReview"] = run_agentic_review(self.title, self.description, output, context.input_data.get("targetFramework", ""))
+            from migration_agent_cli.core.guardrails import report_llm_usage
+            report_llm_usage(self.title, output["agenticReview"], logs)
             logs.append(f"Completed {self.title}.")
             return AgentExecutionResult.completed(context, started, logs, output)
         except Exception as exc:

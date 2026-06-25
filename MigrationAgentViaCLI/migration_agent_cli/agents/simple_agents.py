@@ -178,9 +178,15 @@ class CodeTransformationAgent(StructuredMigrationAgent):
                 continue
             _transform_razor_view(cshtml_file, changed_files, logs)
 
-        from migration_agent_cli.core.guardrails import check_program_cs_exists, check_target_framework
+        from migration_agent_cli.core.guardrails import check_program_cs_exists, check_target_framework, run_csharp_standards, check_connection_strings_exist, check_dbset_exists, check_async_controllers, check_input_validation, check_dependency_vulnerabilities
         check_program_cs_exists(migrated_root, logs)
         check_target_framework(migrated_root, context.input_data.get("targetFramework", "net8.0"), logs)
+        check_connection_strings_exist(migrated_root, logs)
+        check_dbset_exists(migrated_root, logs)
+        check_async_controllers(migrated_root, logs)
+        check_input_validation(migrated_root, logs)
+        check_dependency_vulnerabilities(migrated_root, logs)
+        run_csharp_standards(migrated_root, logs)
         logs.append(f"Transformed {len(changed_files)} files with {len(all_fixes)} fixes. Startup migrations: {len(startup_migrated)}.")
         return {
             "appliedFixes": all_fixes,
@@ -495,11 +501,15 @@ class ReportGenerationAgent(StructuredMigrationAgent):
                     lines.append(f"### {rel}")
                 lines.append(f"- Line {item['line']}: {item['message']}")
 
-        from migration_agent_cli.core.guardrails import check_report_status_accuracy
+        from migration_agent_cli.core.guardrails import check_report_status_accuracy, check_jwt_expiry_set, write_audit_trail
         check_report_status_accuracy(overall_status, len(build_errors), logs)
+        if migrated_source:
+            check_jwt_expiry_set(migrated_source, logs)
+        audit_path = write_audit_trail(context.run_id, str(run_dir(context)), agent_results if 'agent_results' in dir() else [], logs)
         report_path.write_text("\n".join(lines), encoding="utf-8")
         return {
             "reports": [str(report_path)],
+            "auditTrail": audit_path,
             "summary": {
                 "overallStatus": overall_status,
                 "agentOutputs": statuses,

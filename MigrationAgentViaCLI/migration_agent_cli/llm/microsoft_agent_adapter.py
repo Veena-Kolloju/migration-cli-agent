@@ -113,11 +113,13 @@ def run_agentic_review(agent_title: str, agent_description: str, output: dict[st
         ctx = contextvars.copy_context()
         response = loop.run_until_complete(ctx.run(agent.run, prompt))
         text = response.text or str(response.value)
+        usage = getattr(response, "usage", {})
         return {
             "provider": config.provider,
             "model": config.model,
             "framework": "microsoft-agent-framework",
             "response": _parse_json_or_text(text),
+            "usage": usage if isinstance(usage, dict) else {},
         }
     except Exception as exc:
         raise AgenticRuntimeExecutionError(f"Microsoft Agent Framework LLM execution failed: {exc}") from exc

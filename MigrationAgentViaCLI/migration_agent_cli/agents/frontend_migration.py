@@ -94,8 +94,9 @@ class FrontendMigrationAgent(StructuredMigrationAgent):
         scaffold = _generate_scaffold(frontend_root, src_dir, routes, logs)
         generated.extend(scaffold)
 
-        from migration_agent_cli.core.guardrails import check_app_jsx_exists
+        from migration_agent_cli.core.guardrails import check_app_jsx_exists, run_react_standards
         check_app_jsx_exists(str(frontend_root), logs)
+        run_react_standards(str(frontend_root), logs)
         logs.append(f"Frontend migration complete. Generated {len(generated)} files.")
         return {
             "generatedFiles": generated,
