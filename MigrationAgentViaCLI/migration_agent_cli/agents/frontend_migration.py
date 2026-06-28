@@ -370,7 +370,15 @@ def _convert_angularjs_services(
         lines_with_import = ["import api from './api';", ""] + lines[2:]
         out_file.write_text("\n".join(lines_with_import), encoding="utf-8")
         generated.append(str(out_file))
+        # Map all factories in this file to the single generated filename
+        generated_stem = out_file.stem
+        for svc_name in list(service_imports.keys()):
+            service_imports[svc_name] = generated_stem
         logs.append(f"Converted AngularJS service {svc_file.name} → {out_file.name}")
+
+    # Only keep service_imports entries whose generated file actually exists
+    generated_stems = {Path(f).stem for f in generated}
+    service_imports = {k: v for k, v in service_imports.items() if v in generated_stems}
 
     return {"files": generated, "service_imports": service_imports}
 
@@ -383,12 +391,15 @@ def _build_angularjs_react_component(
     logs: list[str],
 ) -> str:
     """Build a React component from AngularJS controller + partial HTML."""
-    # Determine which services this component uses
+    # Determine which services this component uses — only import if file was actually generated
     used_services = set(sc[0] for sc in ctrl_info.get("service_calls", []))
+    generated_pascal_names = {_to_pascal_case(v).lower() for v in service_map.values()}
     service_imports = []
+    seen_imports: set[str] = set()
     for svc_name, js_name in service_map.items():
-        if svc_name in used_services:
-            pascal_name = _to_pascal_case(svc_name)
+        pascal_name = _to_pascal_case(js_name)
+        if svc_name in used_services and pascal_name.lower() in generated_pascal_names and pascal_name not in seen_imports:
+            seen_imports.add(pascal_name)
             service_imports.append(f"import {pascal_name} from '../services/{pascal_name}';")
 
     # Convert AngularJS HTML template to JSX
@@ -461,6 +472,7 @@ def _build_angularjs_react_component(
             lines.append("      clearmenu();")
             lines.append("    } catch (err) { console.error(err); }")
         elif "delete" in method.lower():
+            lines[-1] = f"  const {camel} = async (item) => {{"
             lines.append("    try {")
             lines.append(f"      await {first_svc}.remove(item.id);")
             lines.append("      getMenuList();")
@@ -471,6 +483,7 @@ def _build_angularjs_react_component(
             lines.append("    setMenuUpdate(false);")
             lines.append("    setOnClickValidate(false);")
         elif "edit" in method.lower() or "foredit" in method.lower():
+            lines[-1] = f"  const {camel} = async (item) => {{"
             lines.append("    setMenu({...item});")
             lines.append("    setIsAddForm(true);")
             lines.append("    setMenuUpdate(true);")
@@ -516,9 +529,11 @@ def _angularjs_template_to_jsx(html: str) -> str:
     # Convert HTML comments → JSX comments before any other processing
     html = re.sub(r'<!--(.*?)-->', lambda m: '{/*' + m.group(1) + '*/}', html, flags=re.DOTALL)
 
-    # AngularJS directive conversions
-    html = html.replace('data-ng-model=', 'value=')
-    html = html.replace('ng-model=', 'value=')
+    # AngularJS directive conversions — ng-model → value={expr} (JSX expression, not string)
+    html = re.sub(r'data-ng-model="([^"]+)"', lambda m: 'value={' + m.group(1) + '}', html)
+    html = re.sub(r'data-ng-model=\'([^\']+)\'', lambda m: 'value={' + m.group(1) + '}', html)
+    html = re.sub(r'ng-model="([^"]+)"', lambda m: 'value={' + m.group(1) + '}', html)
+    html = re.sub(r'ng-model=\'([^\']+)\'', lambda m: 'value={' + m.group(1) + '}', html)
 
     # ng-click → onClick (strip AngularJS form validation args like myForm.$valid)
     def _ng_click_to_jsx(m: re.Match) -> str:
@@ -533,22 +548,53 @@ def _angularjs_template_to_jsx(html: str) -> str:
     html = re.sub(r'\s+data-ng-if=["\']([^"\']*)["\'\s]', ' ', html)
     html = re.sub(r'\s+ng-if=["\']([^"\']*)["\'\s]', ' ', html)
 
-    # ng-repeat → convert the wrapping element into a .map() over menuList
+    # ng-repeat → store repeat info for post-processing
+    repeat_info: dict[str, str] = {}
+
     def _ng_repeat_to_map(m: re.Match) -> str:
         expr = m.group(1).strip()  # e.g. "menuObj in menuList"
         repeat_match = re.match(r'(\w+)\s+in\s+(\w+)', expr)
         if repeat_match:
             item, collection = repeat_match.group(1), repeat_match.group(2)
-            return f' key={{index}} /* {collection}.map(({item}, index) => ( */'
+            repeat_info['item'] = item
+            repeat_info['collection'] = collection
+            return f' key={{index}}'
         return ' '
     html = re.sub(r'\s+data-ng-repeat=["\']([^"\']*)["\'\s]', _ng_repeat_to_map, html)
     html = re.sub(r'\s+ng-repeat=["\']([^"\']*)["\'\s]', _ng_repeat_to_map, html)
+
+    # Post-process: wrap the ng-repeat element in a proper .map() + empty state fallback
+    if repeat_info:
+        item = repeat_info['item']
+        collection = repeat_info['collection']
+        # Remove original static fallback row left by ng-if strip
+        html = re.sub(
+            r'<tr[^>]*>\s*<td[^>]*>No Record is Available</td>\s*</tr>',
+            '',
+            html,
+            flags=re.DOTALL
+        )
+        # Find the repeated element (tr with key={index}) and wrap it
+        html = re.sub(
+            r'(<tr\s[^>]*key=\{index\}[^>]*>.*?</tr>)',
+            lambda m: (
+                f'{{{collection}.length === 0 ? (\n'
+                f'<tr><td colSpan="100" className="text-center">No Record is Available</td></tr>\n'
+                f') : (\n'
+                f'{collection}.map(({item}, index) => (\n'
+                + m.group(1) +
+                f'\n))\n)}}'
+            ),
+            html,
+            flags=re.DOTALL
+        )
 
     # ng-show → inline style display
     html = re.sub(r'data-ng-show=["\']([^"\']*)["\'\s]', lambda m: f'style={{{{display: ({_ng_expr_to_jsx(m.group(1))}) ? "block" : "none"}}}} ', html)
     html = re.sub(r'ng-show=["\']([^"\']*)["\'\s]', lambda m: f'style={{{{display: ({_ng_expr_to_jsx(m.group(1))}) ? "block" : "none"}}}} ', html)
 
     # Convert style="css-string" → style={{jsObject}}
+    # Also absorbs any adjacent ng-show display value already on the same element
     def _style_str_to_jsx(m: re.Match) -> str:
         css = m.group(1)
         props = []
@@ -566,30 +612,20 @@ def _angularjs_template_to_jsx(html: str) -> str:
 
     html = re.sub(r'style="([^"]+)"', _style_str_to_jsx, html)
 
-    # Convert existing single-brace style={...} → style={{...}}
-    # Handles: style={border: "1px"} → style={{border: "1px"}}
-    def _fix_single_brace_style(m: re.Match) -> str:
-        inner = m.group(1)
-        # Already double-braced — skip
-        if inner.startswith('{'):
-            return m.group(0)
-        # Skip JSX expressions like style={someVar}
-        if re.match(r'^\w+$', inner.strip()):
-            return m.group(0)
-        return 'style={{' + inner + '}}'
-    # Match style={...} where content is CSS properties (contains colon)
-    html = re.sub(r'style=\{([^{}]+:[^{}]+)\}', _fix_single_brace_style, html)
-
     # Merge duplicate style attributes: style={{a}} style={{b}} → style={{a, b}}
+    # Use a loop to handle multiple consecutive duplicates on the same element
     def _merge_styles(m: re.Match) -> str:
         return f'style={{{{{m.group(1).strip()}, {m.group(2).strip()}}}}}'
-    html = re.sub(r'style=\{\{([^}]+)\}\}\s+style=\{\{([^}]+)\}\}', _merge_styles, html)
+    prev = None
+    while prev != html:
+        prev = html
+        html = re.sub(r'style=\{\{((?:[^{}]|\{[^{}]*\})+)\}\}\s+style=\{\{((?:[^{}]|\{[^{}]*\})+)\}\}', _merge_styles, html)
 
     html = re.sub(r'data-ng-cloak', '', html)
     html = re.sub(r'ng-cloak', '', html)
 
-    # AngularJS expressions {{expr}} → JSX {expr}
-    html = re.sub(r'\{\{([^}]+)\}\}', r'{\1}', html)
+    # AngularJS expressions {{expr}} → JSX {expr} — skip style={{...}} attributes
+    html = re.sub(r'(?<!style=)\{\{([^}]+)\}\}', r'{\1}', html)
 
     # Standard JSX attribute conversions
     html = html.replace(' class=', ' className=')
@@ -597,6 +633,8 @@ def _angularjs_template_to_jsx(html: str) -> str:
     html = re.sub(r'\bcolspan=', 'colSpan=', html)
 
     # HTML event attributes → React camelCase
+    # Remove onkeyup entirely — handler function doesn't exist in React context
+    html = re.sub(r'\bonkeyup="[^"]*"', '', html)
     html = re.sub(r'\bonkeyup=', 'onKeyUp=', html)
     html = re.sub(r'\bonkeydown=', 'onKeyDown=', html)
     html = re.sub(r'\bonkeypress=', 'onKeyPress=', html)
